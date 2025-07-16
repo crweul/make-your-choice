@@ -56,6 +56,7 @@ namespace MakeYourChoice
         public Form1()
         {
             InitializeComponent();
+            this.Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"));
             StartPingTimer();
         }
 
@@ -344,7 +345,7 @@ namespace MakeYourChoice
                 Text            = "About Make Your Choice",
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 StartPosition   = FormStartPosition.CenterParent,
-                ClientSize      = new Size(320, 140),
+                ClientSize      = new Size(480, 140),
                 MaximizeBox     = false,
                 MinimizeBox     = false,
                 ShowInTaskbar   = false,
@@ -353,23 +354,39 @@ namespace MakeYourChoice
 
             var lblTitle = new Label
             {
-                Text     = "Make Your Choice (DbD Server Selector) by Ky",
+                Text     = "Make Your Choice (DbD Server Selector)",
                 Font     = new Font(Font.FontFamily, 10, FontStyle.Bold),
                 AutoSize = true,
                 Location = new Point(10, 10)
             };
-            var lblVersion = new Label
+
+            var lblDeveloper = new LinkLabel
             {
-                Text     = "Version 0.5.0",
-                Font     = new Font(Font.FontFamily, 8, FontStyle.Italic),
+                Text     = "Developer: Ky",
+                Font     = new Font(Font.FontFamily, 8),
+                LinkArea = new LinkArea(11, 2),
                 AutoSize = true,
                 Location = new Point(10, lblTitle.Bottom + 10)
             };
+            lblDeveloper.Links.Add(11, 2, "https://kaneki.nz");
+            lblDeveloper.LinkClicked += (s, e) =>
+            {
+                Process.Start(new ProcessStartInfo(e.Link.LinkData.ToString()) { UseShellExecute = true });
+            };
+            about.Controls.Add(lblDeveloper);
+
+            var lblVersion = new Label
+            {
+                Text     = "Version 0.6.1\nWindows 7 Service Pack 1 or higher.",
+                Font     = new Font(Font.FontFamily, 8, FontStyle.Italic),
+                AutoSize = true,
+                Location = new Point(10, lblDeveloper.Bottom + 10)
+            };
             var btnOk = new Button
             {
-                Text         = "OK",
+                Text         = "Awesome!",
                 DialogResult = DialogResult.OK,
-                Size         = new Size(75, 25),
+                Size         = new Size(125, 25),
                 Location     = new Point(about.ClientSize.Width - 85, about.ClientSize.Height - 35)
             };
 
