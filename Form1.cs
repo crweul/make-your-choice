@@ -124,9 +124,11 @@ namespace MakeYourChoice
             _lv.Groups.AddRange(new[] { grpEurope, grpAmericas, grpAsia, grpOceania, grpChina });
             foreach (var kv in _regions)
             {
-                var item = new ListViewItem(kv.Key) {
+                var item = new ListViewItem(kv.Key)
+                {
                     Group = _lv.Groups[GetGroupName(kv.Key)],
-                    Checked = false
+                    Checked = false,
+                    UseItemStyleForSubItems = false
                 };
                 item.SubItems.Add("…");
                 _lv.Items.Add(item);
@@ -189,7 +191,7 @@ namespace MakeYourChoice
                     _lv.Invoke((Action)(() =>
                     {
                         var sub = item.SubItems[1];
-                        sub.Text      = ms >= 0 ? $"{ms} ms" : "err";
+                        sub.Text      = ms >= 0 ? $"{ms} ms" : "blocked";
                         sub.ForeColor = GetColorForLatency(ms);
                     }));
                 }
@@ -201,9 +203,9 @@ namespace MakeYourChoice
         {
             if (ms < 0)   return Color.Gray;
             if (ms < 80)  return Color.Green;
-            if (ms < 110) return Color.Yellow;
-            if (ms < 160) return Color.Orange;
-            return Color.Red;
+            if (ms < 130) return Color.Orange;
+            if (ms < 250) return Color.Crimson;
+            return Color.Purple;
         }
 
         private string GetGroupName(string region)
@@ -376,7 +378,7 @@ namespace MakeYourChoice
 
             var lblVersion = new Label
             {
-                Text     = "Version 0.6.2\nWindows 7 Service Pack 1 or higher.",
+                Text     = "Version 0.6.3\nWindows 7 Service Pack 1 or higher.",
                 Font     = new Font(Font.FontFamily, 8, FontStyle.Italic),
                 AutoSize = true,
                 Location = new Point(10, lblDeveloper.Bottom + 10)
