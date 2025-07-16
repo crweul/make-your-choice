@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+    <PropertyGroup>
+        <!-- target .NET 6 on Windows with WinForms -->
+        <TargetFramework>net6.0-windows</TargetFramework>
+        <UseWindowsForms>true</UseWindowsForms>
+
+        <!-- explicitly make this a WinForms EXE -->
+        <OutputType>WinExe</OutputType>
+        <!-- allow building Windows targets on macOS -->
+        <EnableWindowsTargeting>true</EnableWindowsTargeting>
+
+        <!-- single-file, self-contained publish -->
+        <PublishSingleFile>true</PublishSingleFile>
+        <SelfContained>true</SelfContained>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+
+        <!-- if you want auto-elevation -->
+        <ApplicationManifest>app.manifest</ApplicationManifest>
+    </PropertyGroup>
+</Project>
