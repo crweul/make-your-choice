@@ -13,6 +13,8 @@ The program is available for free on the [Releases tab](https://codeberg.org/ky/
 - Windows 10
 - Windows 11
 
+Steam Deck is unsupported because SteamOS doesn't use a hosts file in the same way Windows does. Therefore this method wouldn't function.
+
 
 # Repository
 I believe everyone has the right to know exactly what kind of code they are running on their machines. This is why the code is available to the public. Please refer to the usage details below for more information.
