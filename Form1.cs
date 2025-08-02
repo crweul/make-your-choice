@@ -13,6 +13,7 @@ using System.Windows.Forms;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Linq;
+using System.Reflection;
 
 namespace MakeYourChoice
 {
@@ -21,37 +22,39 @@ namespace MakeYourChoice
         private const string RepoUrl    = "https://codeberg.org/ky/make-your-choice";
         private const string WebsiteUrl = "https://kurocat.net";
         private const string DiscordUrl = "https://discord.gg/gnvtATeVc4";
-        private const string CurrentVersion = "0.7.1";
+        private const string CurrentVersion = "0.7.2";
         private const string Developer = "ky";
         private const string Repo  = "make-your-choice";
 
-        private readonly Dictionary<string, string[]> _regions = new()
+        // Holds endpoint list and stability flag for each region
+        private record RegionInfo(string[] Hosts, bool Stable);
+        private readonly Dictionary<string, RegionInfo> _regions = new()
         {
             // Europe
-            { "Europe (London)",          new[]{ "gamelift.eu-west-2.amazonaws.com",    "gamelift-ping.eu-west-2.api.aws" } },
-            { "Europe (Ireland)",         new[]{ "gamelift.eu-west-1.amazonaws.com",    "gamelift-ping.eu-west-1.api.aws" } },
-            { "Europe (Frankfurt)",       new[]{ "gamelift.eu-central-1.amazonaws.com", "gamelift-ping.eu-central-1.api.aws" } },
+            { "Europe (London)",          new RegionInfo(new[]{ "gamelift.eu-west-2.amazonaws.com",    "gamelift-ping.eu-west-2.api.aws" }, false) },
+            { "Europe (Ireland)",         new RegionInfo(new[]{ "gamelift.eu-west-1.amazonaws.com",    "gamelift-ping.eu-west-1.api.aws" }, true) },
+            { "Europe (Frankfurt)",       new RegionInfo(new[]{ "gamelift.eu-central-1.amazonaws.com", "gamelift-ping.eu-central-1.api.aws" }, true) },
 
             // The Americas
-            { "US East (N. Virginia)",    new[]{ "gamelift.us-east-1.amazonaws.com",    "gamelift-ping.us-east-1.api.aws" } },
-            { "US East (Ohio)",           new[]{ "gamelift.us-east-2.amazonaws.com",    "gamelift-ping.us-east-2.api.aws" } },
-            { "US West (N. California)",  new[]{ "gamelift.us-west-1.amazonaws.com",    "gamelift-ping.us-west-1.api.aws" } },
-            { "US West (Oregon)",         new[]{ "gamelift.us-west-2.amazonaws.com",    "gamelift-ping.us-west-2.api.aws" } },
-            { "Canada (Central)",         new[]{ "gamelift.ca-central-1.amazonaws.com", "gamelift-ping.ca-central-1.api.aws" } },
-            { "South America (São Paulo)",new[]{ "gamelift.sa-east-1.amazonaws.com",   "gamelift-ping.sa-east-1.api.aws" } },
+            { "US East (N. Virginia)",    new RegionInfo(new[]{ "gamelift.us-east-1.amazonaws.com",    "gamelift-ping.us-east-1.api.aws" }, true) },
+            { "US East (Ohio)",           new RegionInfo(new[]{ "gamelift.us-east-2.amazonaws.com",    "gamelift-ping.us-east-2.api.aws" }, true) },
+            { "US West (N. California)",  new RegionInfo(new[]{ "gamelift.us-west-1.amazonaws.com",    "gamelift-ping.us-west-1.api.aws" }, true) },
+            { "US West (Oregon)",         new RegionInfo(new[]{ "gamelift.us-west-2.amazonaws.com",    "gamelift-ping.us-west-2.api.aws" }, true) },
+            { "Canada (Central)",         new RegionInfo(new[]{ "gamelift.ca-central-1.amazonaws.com", "gamelift-ping.ca-central-1.api.aws" }, false) },
+            { "South America (São Paulo)",new RegionInfo(new[]{ "gamelift.sa-east-1.amazonaws.com",   "gamelift-ping.sa-east-1.api.aws" }, true) },
 
             // Asia (excluding China)
-            { "Asia Pacific (Tokyo)",     new[]{ "gamelift.ap-northeast-1.amazonaws.com","gamelift-ping.ap-northeast-1.api.aws" } },
-            { "Asia Pacific (Seoul)",     new[]{ "gamelift.ap-northeast-2.amazonaws.com","gamelift-ping.ap-northeast-2.api.aws" } },
-            { "Asia Pacific (Mumbai)",    new[]{ "gamelift.ap-south-1.amazonaws.com",   "gamelift-ping.ap-south-1.api.aws" } },
-            { "Asia Pacific (Singapore)", new[]{ "gamelift.ap-southeast-1.amazonaws.com","gamelift-ping.ap-southeast-1.api.aws" } },
+            { "Asia Pacific (Tokyo)",     new RegionInfo(new[]{ "gamelift.ap-northeast-1.amazonaws.com","gamelift-ping.ap-northeast-1.api.aws" }, true) },
+            { "Asia Pacific (Seoul)",     new RegionInfo(new[]{ "gamelift.ap-northeast-2.amazonaws.com","gamelift-ping.ap-northeast-2.api.aws" }, true) },
+            { "Asia Pacific (Mumbai)",    new RegionInfo(new[]{ "gamelift.ap-south-1.amazonaws.com",   "gamelift-ping.ap-south-1.api.aws" }, true) },
+            { "Asia Pacific (Singapore)", new RegionInfo(new[]{ "gamelift.ap-southeast-1.amazonaws.com","gamelift-ping.ap-southeast-1.api.aws" }, true) },
 
             // Oceania
-            { "Asia Pacific (Sydney)",    new[]{ "gamelift.ap-southeast-2.amazonaws.com","gamelift-ping.ap-southeast-2.api.aws" } },
+            { "Asia Pacific (Sydney)",    new RegionInfo(new[]{ "gamelift.ap-southeast-2.amazonaws.com","gamelift-ping.ap-southeast-2.api.aws" }, true) },
 
             // China
-            { "China (Beijing)",          new[]{ "gamelift.cn-north-1.amazonaws.com.cn" } },
-            { "China (Ningxia)",          new[]{ "gamelift.cn-northwest-1.amazonaws.com.cn" } },
+            { "China (Beijing)",          new RegionInfo(new[]{ "gamelift.cn-north-1.amazonaws.com.cn" }, true) },
+            { "China (Ningxia)",          new RegionInfo(new[]{ "gamelift.cn-northwest-1.amazonaws.com.cn" }, true) },
         };
 
         private MenuStrip      _menuStrip;
@@ -207,6 +210,15 @@ namespace MakeYourChoice
                 ShowGroups    = true,
                 Dock          = DockStyle.Fill
             };
+            _lv.ShowItemToolTips = true;
+            // Enable double buffering to reduce flicker
+            typeof(ListView).InvokeMember(
+                "DoubleBuffered",
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.SetProperty,
+                null,
+                _lv,
+                new object[] { true }
+            );
             _lv.Columns.Add("Server",  280);
             _lv.Columns.Add("Latency", 120);
             var grpEurope   = new ListViewGroup("Europe",     HorizontalAlignment.Left) { Name = "Europe" };
@@ -217,12 +229,20 @@ namespace MakeYourChoice
             _lv.Groups.AddRange(new[] { grpEurope, grpAmericas, grpAsia, grpOceania, grpChina });
             foreach (var kv in _regions)
             {
-                var item = new ListViewItem(kv.Key)
+                var regionKey = kv.Key;
+                var displayName = regionKey + (kv.Value.Stable ? string.Empty : " ⚠︎");
+                var item = new ListViewItem(displayName)
                 {
-                    Group = _lv.Groups[GetGroupName(kv.Key)],
+                    Tag = regionKey,
+                    Group = _lv.Groups[GetGroupName(regionKey)],
                     Checked = false,
                     UseItemStyleForSubItems = false
                 };
+                if (!kv.Value.Stable)
+                {
+                    item.ForeColor = Color.Orange;
+                    item.ToolTipText = "Unstable server";
+                }
                 item.SubItems.Add("…");
                 _lv.Items.Add(item);
             }
@@ -324,28 +344,42 @@ namespace MakeYourChoice
         {
             var pinger = new Ping();
             _pingTimer = new Timer { Interval = 10_000 };
-            _pingTimer.Tick += async (_,__) =>
+            _pingTimer.Tick += async (_, __) =>
             {
+                // Collect ping results for all regions
+                var results = new Dictionary<string, long>();
                 foreach (ListViewItem item in _lv.Items)
                 {
                     long ms;
                     try
                     {
-                        var reply = await pinger.SendPingAsync(_regions[item.Text][0], 2000);
+                        var regionKey = (string)item.Tag;
+                        var hosts = _regions[regionKey].Hosts;
+                        var reply = await pinger.SendPingAsync(hosts[0], 2000);
                         ms = reply.Status == IPStatus.Success ? reply.RoundtripTime : -1;
                     }
                     catch
                     {
                         ms = -1;
                     }
+                    results[(string)item.Tag] = ms;
+                }
 
-                    _lv.Invoke((Action)(() =>
+                // Update UI in one batch to avoid flicker
+                _lv.Invoke((Action)(() =>
+                {
+                    _lv.BeginUpdate();
+                    foreach (ListViewItem item in _lv.Items)
                     {
+                        var regionKey = (string)item.Tag;
+                        var ms = results[regionKey];
                         var sub = item.SubItems[1];
                         sub.Text      = ms >= 0 ? $"{ms} ms" : "disconnected";
                         sub.ForeColor = GetColorForLatency(ms);
-                    }));
-                }
+                        sub.Font      = new Font(sub.Font, FontStyle.Italic);
+                    }
+                    _lv.EndUpdate();
+                }));
             };
             _pingTimer.Start();
         }
@@ -413,8 +447,8 @@ namespace MakeYourChoice
                     return;
                 }
 
-                var region = _lv.CheckedItems[0].Text;
-                var hosts  = _regions[region];
+                var regionKey = (string)_lv.CheckedItems[0].Tag;
+                var hosts = _regions[regionKey].Hosts;
                 var serviceHost = hosts[0];
                 var pingHost    = hosts.Length > 1 ? hosts[1] : hosts[0];
 
@@ -455,7 +489,8 @@ namespace MakeYourChoice
 
                     foreach (var kv in _regions)
                     {
-                        foreach (var h in kv.Value)
+                        var regionHosts = kv.Value.Hosts;
+                        foreach (var h in regionHosts)
                         {
                             bool isPing = h.Contains("ping", StringComparison.OrdinalIgnoreCase);
                             var ip = isPing ? pingIp : svcIp;
@@ -535,7 +570,9 @@ namespace MakeYourChoice
                 foreach (ListViewItem item in _lv.Items)
                 {
                     bool allow = item.Checked;
-                    foreach (var h in _regions[item.Text])
+                    var regionKey = (string)item.Tag;
+                    var hosts = _regions[regionKey].Hosts;
+                    foreach (var h in hosts)
                     {
                         bool isPing = h.Contains("ping", StringComparison.OrdinalIgnoreCase);
                         bool include = _blockMode == BlockMode.Both
