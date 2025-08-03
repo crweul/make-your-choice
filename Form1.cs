@@ -139,8 +139,8 @@ namespace MakeYourChoice
         {
             // ── Form setup ────────────────────────────────────────────────
             Text            = "Make Your Choice (DbD Server Selector)";
-            Width           = 460;
-            Height          = 650;
+            Width           = 400;
+            Height          = 585;
             StartPosition   = FormStartPosition.CenterScreen;
             Padding         = new Padding(10);
             FormBorderStyle = FormBorderStyle.Sizable;
@@ -180,7 +180,7 @@ namespace MakeYourChoice
 
             var mHelp     = new ToolStripMenuItem("Help");
             var miWebsite = new ToolStripMenuItem("Website");
-            var miDiscord = new ToolStripMenuItem("Discord");
+            var miDiscord = new ToolStripMenuItem("Discord (Get support)");
             miWebsite.Click += (_,__) => OpenUrl(WebsiteUrl);
             miDiscord.Click += (_,__) => OpenUrl(DiscordUrl);
             mHelp.DropDownItems.Add(miWebsite);
@@ -219,8 +219,8 @@ namespace MakeYourChoice
                 _lv,
                 new object[] { true }
             );
-            _lv.Columns.Add("Server",  280);
-            _lv.Columns.Add("Latency", 120);
+            _lv.Columns.Add("Server",  220);
+            _lv.Columns.Add("Latency", 115);
             var grpEurope   = new ListViewGroup("Europe",     HorizontalAlignment.Left) { Name = "Europe" };
             var grpAmericas = new ListViewGroup("The Americas",HorizontalAlignment.Left) { Name = "Americas" };
             var grpAsia     = new ListViewGroup("Asia (Excl. Cn)",       HorizontalAlignment.Left) { Name = "Asia" };
@@ -241,7 +241,7 @@ namespace MakeYourChoice
                 if (!kv.Value.Stable)
                 {
                     item.ForeColor = Color.Orange;
-                    item.ToolTipText = "Unstable server";
+                    item.ToolTipText = "Unstable server: ping may suffer heavily.";
                 }
                 item.SubItems.Add("…");
                 _lv.Items.Add(item);
@@ -343,7 +343,7 @@ namespace MakeYourChoice
         private void StartPingTimer()
         {
             var pinger = new Ping();
-            _pingTimer = new Timer { Interval = 10_000 };
+            _pingTimer = new Timer { Interval = 5_000 };
             _pingTimer.Tick += async (_, __) =>
             {
                 // Collect ping results for all regions
@@ -518,7 +518,7 @@ namespace MakeYourChoice
                         // ignore DNS flush errors
                     }
                     MessageBox.Show(
-                        "Hosts file updated successfully!\nDNS cache flushed.",
+                        "Hosts file updated and DNS cache flushed successfully!\n\nRestart DbD to make these changes take effect.",
                         "Success",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
@@ -605,7 +605,7 @@ namespace MakeYourChoice
                     // ignore DNS flush errors
                 }
                 MessageBox.Show(
-                    "Hosts file updated successfully!\nDNS cache flushed.",
+                    "Hosts file updated and DNS cache flushed successfully!\n\nRestart DbD to make these changes take effect.",
                     "Success",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -758,11 +758,13 @@ namespace MakeYourChoice
                 Text            = "Program Settings",
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 StartPosition   = FormStartPosition.CenterParent,
-                ClientSize      = new Size(350, 235),
+                //ClientSize      = new Size(350, 280),
                 MaximizeBox     = false,
                 MinimizeBox     = false,
                 ShowInTaskbar   = false,
-                Padding         = new Padding(10)
+                Padding         = new Padding(10),
+                AutoSize        = true,
+                AutoSizeMode    = AutoSizeMode.GrowAndShrink
             };
 
             // ── Mode selection ─────────────────────────────────────────
@@ -806,20 +808,46 @@ namespace MakeYourChoice
             cbApplyMode.SelectedIndexChanged += (s, e) =>
                 blockPanel.Enabled = cbApplyMode.SelectedIndex == 0;
 
+            // ── Tip label for settings ────────────────────────────────────────
+            var lblTipSettings = new Label
+            {
+                Text = "Default options are recommended. If the default method doesn't work, try an alternative method below. Your experience may vary by using settings other than the default.",
+                AutoSize = true,
+                MaximumSize = new Size(320, 0),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(5),
+                Margin = new Padding(0, 0, 0, 10)
+            };
+
             var btnOk = new Button
             {
-                Text            = "Apply",
+                Text            = "Apply Changes",
                 DialogResult    = DialogResult.OK,
                 AutoSize        = true,
                 AutoSizeMode    = AutoSizeMode.GrowAndShrink,
                 Anchor          = AnchorStyles.Bottom | AnchorStyles.Right
             };
-            btnOk.Location = new Point(
-                dialog.ClientSize.Width - btnOk.Width - 10,
-                dialog.ClientSize.Height - btnOk.Height - 10
-            );
 
-            dialog.Controls.AddRange(new Control[] { modePanel, blockPanel, btnOk });
+            // ── TableLayoutPanel for dynamic layout ──────────────────────────
+            var tlpSettings = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 4,
+            };
+            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            tlpSettings.Controls.Add(modePanel,       0, 0);
+            tlpSettings.Controls.Add(blockPanel,      0, 1);
+            tlpSettings.Controls.Add(lblTipSettings,  0, 2);
+            tlpSettings.Controls.Add(btnOk,           0, 3);
+
+            dialog.Controls.Add(tlpSettings);
             dialog.AcceptButton = btnOk;
 
             if (dialog.ShowDialog(this) == DialogResult.OK)
