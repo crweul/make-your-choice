@@ -139,7 +139,7 @@ namespace MakeYourChoice
         {
             // ── Form setup ────────────────────────────────────────────────
             Text            = "Make Your Choice (DbD Server Selector)";
-            Width           = 400;
+            Width           = 405;
             Height          = 585;
             StartPosition   = FormStartPosition.CenterScreen;
             Padding         = new Padding(10);
@@ -157,7 +157,7 @@ namespace MakeYourChoice
             miAbout.Click += (_,__) => ShowAboutDialog();
             var miCheck  = new ToolStripMenuItem("Check for updates");
             miCheck.Click += async (_,__) => await CheckForUpdatesAsync(false);
-            var miOpenHostsFolder = new ToolStripMenuItem("Open Hosts Folder");
+            var miOpenHostsFolder = new ToolStripMenuItem("Open hosts file location");
             miOpenHostsFolder.Click += (_, __) =>
             {
                 var hostsFolder = Path.Combine(
@@ -241,7 +241,7 @@ namespace MakeYourChoice
                 if (!kv.Value.Stable)
                 {
                     item.ForeColor = Color.Orange;
-                    item.ToolTipText = "Unstable server: ping may suffer heavily.";
+                    item.ToolTipText = "Unstable server: latency issues may occur.";
                 }
                 item.SubItems.Add("…");
                 _lv.Items.Add(item);
@@ -440,7 +440,7 @@ namespace MakeYourChoice
                 if (_lv.CheckedItems.Count != 1)
                 {
                     MessageBox.Show(
-                        "Please select exactly one region when using Universal Redirect mode.",
+                        "Please select only one server when using Universal Redirect mode.",
                         "Universal Redirect",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
@@ -811,7 +811,7 @@ namespace MakeYourChoice
             // ── Tip label for settings ────────────────────────────────────────
             var lblTipSettings = new Label
             {
-                Text = "Default options are recommended. If the default method doesn't work, try an alternative method below. Your experience may vary by using settings other than the default.",
+                Text = "Default options are recommended. If the default method doesn't work, try an alternative method above. Your experience may vary by using settings other than the default.",
                 AutoSize = true,
                 MaximumSize = new Size(320, 0),
                 TextAlign = ContentAlignment.MiddleLeft,
