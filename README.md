@@ -18,7 +18,7 @@ The program is available for free on the [Releases tab](https://codeberg.org/ky/
 - Windows 10
 - Windows 11
 
-Steam Deck is unsupported because SteamOS doesn't use a hosts file in the same way Windows does. Therefore, this method wouldn't function.
+Linux support is on its way in version 2.0!
 
 # Screenshots
 <img src="https://i.imgur.com/wyNJ7HO.png" alt="Main" height="400"> <img src="https://i.imgur.com/J2pI1sy.png" alt="Main" height="400">  
