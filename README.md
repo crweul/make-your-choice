@@ -36,20 +36,3 @@ The application needs to be run with [administrator permissions](https://learn.m
 
 The UAC Popup appears on Windows Vista and newer.  
 The SmartScreen Alert only appears on Windows 8 and newer.  
-
-
-# Repository
-I believe everyone has the right to know exactly what kind of code they are running on their machines. This is why the code is available to the public. Please refer to the usage details below for more information.
-
-# Usage
-Personal Use License  
-© 2025 https://codeberg.org/ky
-
-You are granted a non-exclusive, non-transferable, revocable license to: 
-- Download and run the software for personal use only.
-
-You MAY NOT:
-- Distribute, sell, rent, or sublicense this software or any portion thereof.
-- Modify, adapt, or create derivative works of the software.
-
-All rights not expressly granted are reserved.
