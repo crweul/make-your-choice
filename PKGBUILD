@@ -12,7 +12,7 @@ source=("git+https://github.com/laewliet/make-your-choice.git#tag=${pkgver/_/-}"
 sha256sums=('SKIP')
 
 prepare() {
-    cd "$srcdir/$pkgname"
+    cd "$srcdir/$pkgname/linux"
     export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
