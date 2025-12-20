@@ -48,9 +48,21 @@ struct AppState {
 }
 
 fn main() -> glib::ExitCode {
+    // Prevent running as root
+    if is_running_as_root() {
+        eprintln!("Error: This application should not be run as root or using sudo.");
+        eprintln!("The program will request sudo permissions when needed.");
+        eprintln!("Please run without sudo.");
+        std::process::exit(1);
+    }
+
     let app = Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
+}
+
+fn is_running_as_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
 }
 
 fn build_ui(app: &Application) {
@@ -276,34 +288,29 @@ fn build_ui(app: &Application) {
         .default_height(585)
         .build();
 
-    // Set window icon (embedded in binary from ICO file)
-    // GTK4 Note: Window icons should be set via icon theme
-    // Convert the embedded ICO to PNG and install it to the icon theme directory
+    // Set window icon from embedded ICO file
     const ICON_DATA: &[u8] = include_bytes!("../icon.ico");
     const ICON_NAME: &str = "make-your-choice";
 
-    // Install icon to runtime icon directory
+    // Install icon to user's local icon directory (only if not already there)
     if let Some(data_dir) = glib::user_data_dir().to_str() {
-        let icon_dir = std::path::PathBuf::from(data_dir).join("icons/hicolor/256x256/apps");
+        let icon_path = std::path::PathBuf::from(data_dir)
+            .join("icons/hicolor/256x256/apps")
+            .join(format!("{}.png", ICON_NAME));
 
-        if let Ok(_) = std::fs::create_dir_all(&icon_dir) {
-            let icon_path = icon_dir.join(format!("{}.png", ICON_NAME));
-
-            // Convert ICO to PNG and save (only if needed)
-            if !icon_path.exists() {
-                // Load ICO using gdk-pixbuf and save as PNG
-                let loader = gtk4::gdk_pixbuf::PixbufLoader::new();
-                if loader.write(ICON_DATA).is_ok() && loader.close().is_ok() {
-                    if let Some(pixbuf) = loader.pixbuf() {
-                        // Save as PNG
-                        let _ = pixbuf.savev(&icon_path, "png", &[]);
+        if !icon_path.exists() {
+            let loader = gtk4::gdk_pixbuf::PixbufLoader::new();
+            if loader.write(ICON_DATA).is_ok() && loader.close().is_ok() {
+                if let Some(pixbuf) = loader.pixbuf() {
+                    if let Some(parent) = icon_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
                     }
+                    let _ = pixbuf.savev(&icon_path, "png", &[]);
                 }
             }
         }
     }
 
-    // Set the icon name on the window
     window.set_icon_name(Some(ICON_NAME));
 
     // Create menu bar
@@ -391,6 +398,9 @@ fn build_ui(app: &Application) {
     // Start ping timer
     start_ping_timer(app_state.clone());
 
+    // Check for updates silently on launch
+    check_for_updates_silent(&app_state, &window);
+
     window.present();
 }
 
@@ -468,8 +478,10 @@ fn setup_menu_actions(app: &Application, window: &ApplicationWindow, app_state: 
 
     // Discord action
     let action = SimpleAction::new("discord", None);
-    let _discord_url = app_state.config.discord_url.clone(); // TODO: Implement opening Discord link
-    action.set_enabled(false);
+    let discord_url = app_state.config.discord_url.clone();
+    action.connect_activate(move |_, _| {
+        open_url(&discord_url);
+    });
     app.add_action(&action);
 }
 
@@ -527,6 +539,44 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
                 );
             }
         }
+    });
+}
+
+fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow) {
+    let window = window.clone();
+    let update_checker = app_state.update_checker.clone();
+    let current_version = app_state.config.current_version.clone();
+    let runtime = app_state.tokio_runtime.clone();
+    let releases_url = update_checker.get_releases_url();
+
+    glib::spawn_future_local(async move {
+        let result = runtime
+            .spawn(async move { update_checker.check_for_updates().await })
+            .await
+            .unwrap();
+
+        // Only show dialog if there's a new version available
+        if let Ok(Some(new_version)) = result {
+            let dialog = MessageDialog::new(
+                Some(&window),
+                gtk4::DialogFlags::MODAL,
+                MessageType::Question,
+                ButtonsType::YesNo,
+                "Update Available",
+            );
+            dialog.set_secondary_text(Some(&format!(
+                "A new version is available: {}.\nWould you like to update?\n\nYour version: {}",
+                new_version, current_version
+            )));
+
+            dialog.run_async(move |dialog, response| {
+                if response == ResponseType::Yes {
+                    open_url(&releases_url);
+                }
+                dialog.close();
+            });
+        }
+        // If Ok(None) or Err, do nothing (silent)
     });
 }
 
