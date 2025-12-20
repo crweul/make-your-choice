@@ -1,37 +1,31 @@
 use std::time::{Duration, Instant};
-use std::net::ToSocketAddrs;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 pub async fn ping_host(hostname: &str) -> i64 {
-    // Run ping in a blocking task since the ping crate is not async
-    let hostname = hostname.to_string();
+    let ports = [443, 80];
 
-    match tokio::task::spawn_blocking(move || {
-        // Resolve hostname to IP address
-        let ip = format!("{}:0", hostname)
-            .to_socket_addrs()
-            .ok()?
-            .next()?
-            .ip();
-
-        // Measure time manually
+    for port in ports {
+        let address = format!("{}:{}", hostname, port);
         let start = Instant::now();
 
-        // Ping with 2 second timeout
-        let result = ping::ping(
-            ip,
-            Some(Duration::from_secs(2)), // timeout
-            None, // ttl
-            None, // ident
-            None, // seq_cnt
-            None, // payload
-        );
-
-        match result {
-            Ok(_) => Some(start.elapsed().as_millis() as i64),
-            Err(_) => None,
+        // Try to establish TCP connection with 2 second timeout
+        match timeout(Duration::from_secs(2), TcpStream::connect(&address)).await {
+            Ok(Ok(_)) => {
+                // Connection successful, return latency
+                return start.elapsed().as_millis() as i64;
+            }
+            Ok(Err(_)) => {
+                // Connection failed, try next port
+                continue;
+            }
+            Err(_) => {
+                // Timeout, try next port
+                continue;
+            }
         }
-    }).await {
-        Ok(Some(latency)) => latency,
-        _ => -1,
     }
+
+    // All connection attempts failed
+    -1
 }
