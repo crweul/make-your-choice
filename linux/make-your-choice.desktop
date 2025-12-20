@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Make Your Choice
+Comment=DbD Server Selector
+Exec=make-your-choice
+Icon=make-your-choice
+Terminal=false
+Categories=Network;Utility;
+StartupWMClass=dev.lawliet.makeyourchoice
