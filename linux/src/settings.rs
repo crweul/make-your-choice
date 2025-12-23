@@ -10,6 +10,8 @@ pub struct UserSettings {
     pub block_mode: BlockMode,
     pub merge_unstable: bool,
     pub last_launched_version: String,
+    #[serde(default)]
+    pub freshest_git_identity: Option<String>,
 }
 
 impl Default for UserSettings {
@@ -19,6 +21,7 @@ impl Default for UserSettings {
             block_mode: BlockMode::Both,
             merge_unstable: true,
             last_launched_version: String::new(),
+            freshest_git_identity: None,
         }
     }
 }
