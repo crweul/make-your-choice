@@ -20,6 +20,9 @@
         <!-- auto-elevation and icon  -->
         <ApplicationManifest>app.manifest</ApplicationManifest>
         <ApplicationIcon>icon.ico</ApplicationIcon>
+
+        <!-- size optimization -->
+        <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     </PropertyGroup>
 
     <ItemGroup>
