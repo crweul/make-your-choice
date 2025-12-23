@@ -80,6 +80,6 @@ After installation, the clone will be removed.
 <img src="https://i.imgur.com/wyNJ7HO.png" alt="Main" height="400"> <img src="https://i.imgur.com/J2pI1sy.png" alt="Main" height="400">  
 *Screenshots taken on Windows 10 with a Windows 7 skin.*
 ## Linux
-<img src="https://i.imgur.com/jdhHDyt.png" alt="Main" height="400"> <img src="https://i.imgur.com/GN6Nesj.png" alt="Main" height="400">  
+<img src="https://i.imgur.com/VlHsxtc.png" alt="Main" height="400"> <img src="https://i.imgur.com/BXZuWkL.png" alt="Main" height="400"> <img src="https://i.imgur.com/xtvswcf.png" alt="Main" height="400">  
 *Screenshots taken on Arch Linux with the KDE Plasma Desktop Environment.*
 
