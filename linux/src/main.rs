@@ -26,11 +26,38 @@ use update::UpdateChecker;
 
 const APP_ID: &str = "dev.lawliet.makeyourchoice";
 
+#[derive(Debug, serde::Deserialize)]
+struct PatchNotes {
+    version: String,
+    notes: Vec<String>,
+}
+
+fn load_versinf() -> (String, String) {
+    const VERSINF_YAML: &str = include_str!("../../VERSINF.yaml");
+
+    match serde_yaml::from_str::<PatchNotes>(VERSINF_YAML) {
+        Ok(versinf) => {
+            let version = versinf.version;
+            let notes = versinf.notes
+                .iter()
+                .map(|note| format!("- {}", note))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let message = format!("Here are some new features and changes:\n\n{}", notes);
+            (version, message)
+        }
+        Err(_) => {
+            ("v0.0.0".to_string(), "Failed to get version info.".to_string()) // Return placeholder on error
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppConfig {
-    repo_url: String,
+    repo_url: Option<String>,
     current_version: String,
-    developer: String,
+    developer: Option<String>,
     repo: String,
     update_message: String,
     discord_url: String,
@@ -104,10 +131,14 @@ fn refresh_warning_symbols(
 }
 
 async fn fetch_git_identity() -> Option<String> {
-    const GIT_USER_ID: &str = "109703063"; // Changing this, or the final result of this functionality may break license compliance
-    let url = format!("https://api.github.com/user/{}", GIT_USER_ID);
+    const UID: &str = "109703063"; // Changing this, or the final result of this functionality may break license compliance
+    let url = format!("https://api.github.com/user/{}", UID);
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+
     match client
         .get(&url)
         .header("User-Agent", "make-your-choice")
@@ -153,49 +184,25 @@ fn build_ui(app: &Application) {
     let settings = Arc::new(Mutex::new(UserSettings::load().unwrap_or_default()));
 
     // Fetch git identifier from API
-    let developer = {
-        let runtime_clone = tokio_runtime.clone();
-        let settings_clone = settings.clone();
-
-        let fetched = runtime_clone.block_on(async {
-            fetch_git_identity().await
-        });
-
-        let mut settings_lock = settings_clone.lock().unwrap();
-
-        if let Some(username) = fetched {
-            // Successfully fetched, update cache
-            settings_lock.freshest_git_identity = Some(username.clone());
-            let _ = settings_lock.save();
-            username
-        } else if let Some(cached) = &settings_lock.freshest_git_identity {
-            // Use cached value
-            cached.clone()
-        } else {
-            // No cached value and fetch failed
-            "n/a".to_string()
-        }
-    };
+    let developer = tokio_runtime.block_on(async {
+        fetch_git_identity().await
+    });
 
     // Load configuration
+    let (current_version, update_message) = load_versinf();
     let config = AppConfig {
-        repo_url: format!("https://github.com/{}/make-your-choice", developer),
-        current_version: "v2.2.0".to_string(), // Must match git tag for updates
-        developer: developer.clone(), // Git username fetched from API
+        repo_url: developer.as_ref().map(|dev| format!("https://github.com/{}/make-your-choice", dev)),
+        current_version,
+        developer, // Fetched from API
         repo: "make-your-choice".to_string(), // Repository name
-        update_message: "Welcome back! Here are the new features and changes in this version:\n\n\
-                        - Added color coded latency on Linux.\n\
-                        - Improved \"About\" dialog menu.\n\
-                        - Fixed the Discord invite link. (fr)\n\
-                        - Fixed a bug where the *unstable* warning would show at all times on Linux.\n\n\
-                        Thank you for your support!".to_string(),
+        update_message,
         discord_url: "https://discord.gg/xEMyAA8gn8".to_string(),
     };
 
     let regions = get_regions();
     let hosts_manager = HostsManager::new(config.discord_url.clone());
     let update_checker = UpdateChecker::new(
-        config.developer.clone(),
+        config.developer.clone().unwrap_or_else(|| "unknown".to_string()),
         config.repo.clone(),
         config.current_version.clone(),
     );
@@ -587,8 +594,17 @@ fn setup_menu_actions(app: &Application, window: &ApplicationWindow, app_state: 
     // Repository action
     let action = SimpleAction::new("repository", None);
     let repo_url = app_state.config.repo_url.clone();
+    let window_clone = window.clone();
     action.connect_activate(move |_, _| {
-        open_url(&repo_url);
+        if let Some(url) = &repo_url {
+            open_url(url);
+        } else {
+            show_error_dialog(
+                &window_clone,
+                "Repository",
+                "Unable to open repository.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL."
+            );
+        }
     });
     app.add_action(&action);
 
@@ -648,6 +664,18 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
     let update_checker = app_state.update_checker.clone();
     let current_version = app_state.config.current_version.clone();
     let runtime = app_state.tokio_runtime.clone();
+    let repo_url = app_state.config.repo_url.clone();
+
+    // Check if developer identity was fetched
+    if repo_url.is_none() {
+        show_error_dialog(
+            &window,
+            "Check For Updates",
+            "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL."
+        );
+        return;
+    }
+
     let releases_url = update_checker.get_releases_url();
 
     glib::spawn_future_local(async move {
@@ -696,6 +724,11 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
 }
 
 fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow) {
+    // Don't check silently if developer identity wasn't fetched
+    if app_state.config.repo_url.is_none() {
+        return;
+    }
+
     let window = window.clone();
     let update_checker = app_state.update_checker.clone();
     let current_version = app_state.config.current_version.clone();
@@ -764,13 +797,20 @@ fn show_about_dialog(app_state: &Rc<AppState>, window: &ApplicationWindow) {
     let developer_box = GtkBox::new(Orientation::Horizontal, 5);
     developer_box.set_halign(gtk4::Align::Start);
     let developer_label = Label::new(Some("Developer: "));
-    let developer_link = gtk4::LinkButton::with_label(
-        &format!("https://github.com/{}", app_state.config.developer),
-        &app_state.config.developer,
-    );
-    developer_link.set_halign(gtk4::Align::Start);
     developer_box.append(&developer_label);
-    developer_box.append(&developer_link);
+
+    if let Some(dev) = &app_state.config.developer {
+        let developer_link = gtk4::LinkButton::with_label(
+            &format!("https://github.com/{}", dev),
+            dev,
+        );
+        developer_link.set_halign(gtk4::Align::Start);
+        developer_box.append(&developer_link);
+    } else {
+        let unknown_label = Label::new(Some("(unknown)"));
+        unknown_label.set_halign(gtk4::Align::Start);
+        developer_box.append(&unknown_label);
+    }
 
     let version = Label::new(Some(&format!(
         "Version {}\nLinux (GTK4)",
