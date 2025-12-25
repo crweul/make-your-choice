@@ -1,4 +1,4 @@
-> [!NOTE] 
+> [!NOTE]
 > This repository was previously hosted on Codeberg and has been moved to GitHub on December 17, 2025.  
 > You are currently on the new repository, no action is required.  
 > ↳ [Visit the old repository](https://codeberg.org/ky/make-your-choice).
@@ -31,6 +31,12 @@ The application needs to be run with [administrator permissions](https://learn.m
 The SmartScreen Alert only appears on Windows 8 and newer.  
 
 ## Linux / SteamOS
+> [!WARNING]
+> **For SteamOS users**: The current version (v2.0.0) will only work on SteamOS if you disable system immutability.
+> Proper SteamOS support will be added in the next update. Hang in there! ( ゝ◡╹ )ノ♡
+>
+> *If you know what you are doing, you could `git clone`, compile to binary, and run that in the mean time.*
+
 ### Prerequisites
 Install the prerequisite packages in order to build, install and run the program. If your distro isn't listed below, find out the correct package names for your distro's package manager.
 #### Arch / SteamOS
@@ -82,4 +88,3 @@ After installation, the clone will be removed.
 ## Linux
 <img src="https://i.imgur.com/VlHsxtc.png" alt="Main" height="400"> <img src="https://i.imgur.com/BXZuWkL.png" alt="Main" height="400"> <img src="https://i.imgur.com/xtvswcf.png" alt="Main" height="400">  
 *Screenshots taken on Arch Linux with the KDE Plasma Desktop Environment.*
-
