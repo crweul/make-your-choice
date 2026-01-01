@@ -1,3 +1,5 @@
 version: v2.3.0
 notes:
   - Added a button to star the repository
+  - Fixed git identity fetch error messages to provide more context and troubleshooting steps
+  - Linux now has a precompiled binary release
