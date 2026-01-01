@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
     <PropertyGroup>
-        <!-- target .NET 6 on Windows with WinForms -->
-        <TargetFramework>net6.0-windows</TargetFramework>
+        <!-- target .NET 10 on Windows with WinForms -->
+        <TargetFramework>net10.0-windows</TargetFramework>
         <ApplicationHighDpiMode>DpiUnaware</ApplicationHighDpiMode>
         <UseWindowsForms>true</UseWindowsForms>
         <OutputType>WinExe</OutputType>
@@ -23,6 +23,13 @@
 
         <!-- size optimization -->
         <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+        <PublishTrimmed>true</PublishTrimmed>
+        <TrimMode>partial</TrimMode>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <DebuggerSupport>false</DebuggerSupport>
+        <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+        <EventSourceSupport>false</EventSourceSupport>
+        <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
     </PropertyGroup>
 
     <ItemGroup>
