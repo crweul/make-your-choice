@@ -750,6 +750,11 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
 fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow) {
     // Don't check silently if developer identity wasn't fetched
     if app_state.config.repo_url.is_none() {
+        show_error_dialog(
+            window,
+            "Check For Updates",
+            "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search."
+        );
         return;
     }
 

@@ -430,15 +430,13 @@ namespace MakeYourChoice
         {
             if (Developer == null)
             {
-                if (!silent)
-                {
-                    MessageBox.Show(
-                        "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search.",
-                        "Check For Updates",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning
-                    );
-                }
+                // Always notify if identity fetch failed, even if silent
+                MessageBox.Show(
+                    "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search.",
+                    "Check For Updates",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
                 return;
             }
 
@@ -455,7 +453,10 @@ namespace MakeYourChoice
 
                 if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
                 {
-                    MessageBox.Show("No releases found.", "Check For Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (!silent)
+                    {
+                        MessageBox.Show("No releases found.", "Check For Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
                     return;
                 }
 
@@ -487,12 +488,15 @@ namespace MakeYourChoice
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    "Error while checking for updates:\n" + ex.Message,
-                    "Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
+                if (!silent)
+                {
+                    MessageBox.Show(
+                        "Error while checking for updates:\n" + ex.Message,
+                        "Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+                }
             }
         }
 
