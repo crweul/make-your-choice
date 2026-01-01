@@ -39,7 +39,7 @@ The SmartScreen Alert only appears on Windows 8 and newer.
 
 ### Prerequisites
 Install the prerequisite packages in order to build, install and run the program. If your distro isn't listed below, find out the correct package names for your distro's package manager.
-#### Arch / SteamOS
+#### Arch
 ```bash
 sudo pacman -S rust gtk4 polkit base-devel git
 ```
@@ -79,6 +79,9 @@ cd make-your-choice/linux/makefile && make install
 cd ~/ && rm -rf ~/make-your-choice
 ```
 After installation, the clone will be removed.
+
+#### Precompiled binary (Least intuitive)
+This option won't provide desktop entries to easily access the app. Use this only if you have no other options available. No prerequisites are required. Simply download the binary from the [Releases](https://github.com/laewliet/make-your-choice/releases/latest) page and run it.
 
 
 # Screenshots
