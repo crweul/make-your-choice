@@ -4,7 +4,7 @@ Write-Host ""
 # Check if dotnet is installed
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     Write-Host "❌ Error: .NET SDK is not installed." -ForegroundColor Red
-    Write-Host "Please install .NET 6.0 SDK or later from https://dotnet.microsoft.com/download"
+    Write-Host "Please install .NET 10.0 SDK or later from https://dotnet.microsoft.com/download"
     exit 1
 }
 
@@ -28,7 +28,7 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "✅ Build successful!" -ForegroundColor Green
     Write-Host ""
     Write-Host "Binary location:" -ForegroundColor Cyan
-    Write-Host "   .\bin\Release\net6.0-windows\win-x64\publish\MakeYourChoice.exe"
+    Write-Host "   .\bin\Release\net10.0-windows\win-x64\publish\MakeYourChoice.exe"
     Write-Host ""
     Write-Host "Note: The application requires Administrator privileges to modify the hosts file" -ForegroundColor Yellow
 } else {
