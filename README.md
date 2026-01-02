@@ -18,8 +18,6 @@ Make Your Choice is a server region changer for Dead by Daylight. It allows you 
 Download the latest `.exe` file from the [Releases](https://github.com/laewliet/make-your-choice/releases/latest) page and run it as administrator.
 
 ## Supported Windows Versions
-- Windows 7
-- Windows 8 & 8.1
 - Windows 10
 - Windows 11
 
