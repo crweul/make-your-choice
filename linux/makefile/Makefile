@@ -51,7 +51,7 @@ install: build
 	# Install icon (256x256)
 	install -Dm644 "$(ICON_FILE)" "$(DESTDIR)$(ICONSDIR)/256x256/apps/$(BINARY_NAME).ico"
 	# Install license
-	install -Dm644 "../LICENSE" "$(DESTDIR)$(LICENSEDIR)/LICENSE"
+	install -Dm644 "../../LICENSE" "$(DESTDIR)$(LICENSEDIR)/LICENSE"
 	# Update desktop database
 	@if [ -z "$(DESTDIR)" ]; then \
 		if command -v update-desktop-database >/dev/null 2>&1; then \

@@ -1,5 +1,9 @@
-version: v2.2.0
+version: v2.3.0
 notes:
-  - Added conflicting entry detection and handling.
-  - Improved settings menu.
-  - Added various backend improvements.
+  - Migrated to .NET 10 for Windows
+  - Added various binary file size optimizations for Windows
+  - Added a cute star symbol to the repository button
+  - Fixed git identity fetch error messages to provide more context and troubleshooting steps
+  - Enhanced git identity fetch feedback in case of potential future API changes
+  - Linux now has a precompiled binary release
+  - SteamOS support!

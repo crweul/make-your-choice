@@ -13,33 +13,48 @@ Make Your Choice is a server region changer for Dead by Daylight. It allows you 
 
 <img src="https://i.imgur.com/oJetRV7.png" alt="Main">
 
-# Download & Installation
-
-## Windows
-### Installation
+# Installation: Windows
+## Installation
 Download the latest `.exe` file from the [Releases](https://github.com/laewliet/make-your-choice/releases/latest) page and run it as administrator.
 
-### Supported Windows Versions
+## Supported Windows Versions
 - Windows 7
 - Windows 8 & 8.1
 - Windows 10
 - Windows 11
 
-### UAC Popup & SmartScreen Alert
+## UAC Popup & SmartScreen Alert
 The application needs to be run with [administrator permissions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/) to ensure the hosts file can be edited. Since I don't want to pay Microsoft a fee for getting this free application signed, you will be met with a prompt to trust the unknown developer.
 
 The SmartScreen Alert only appears on Windows 8 and newer.  
 
-## Linux / SteamOS
-> [!WARNING]
-> **For SteamOS users**: The current version (v2.0.0) will only work on SteamOS if you disable system immutability.
-> Proper SteamOS support will be added in the next update. Hang in there! ( ゝ◡╹ )ノ♡
->
-> *If you know what you are doing, you could `git clone`, compile to binary, and run that in the mean time.*
+# Installation: Linux / SteamOS
+> [!NOTE]
+> **For SteamOS users**: There are two ways to use Make Your Choice:  
+> 1. Download the binary and simply run it. For this, follow the steps for "Precompiled Binary" at the bottom. (Easiest)
+> 2. Disable system immutability, and follow the steps for Arch Linux. This will give you a nice desktop entry which makes it easier to use the program. (Advanced, only recommended for nerds)
 
+## Method 1: Package Manager
+Currently, only Arch Linux is supported for this method.  
+*If you would like to contribute: feel free to distribute Make Your Choice for other package managers, and give me a headsup so I can provide official steps for other people to follow.*
+### Arch
+Simply install the program from the AUR using your AUR helper of choice:
+```bash
+# Using yay
+yay -S make-your-choice
+
+# Using paru
+paru -S make-your-choice
+
+# Using pikaur
+pikaur -S make-your-choice
+```
+
+## Method 2: Build & Install From Source (Makefile)
+This method can be used to build and install the program straight from source using Makefile. This is the best choice for most distros that aren't SteamOS or Arch.
 ### Prerequisites
 Install the prerequisite packages in order to build, install and run the program. If your distro isn't listed below, find out the correct package names for your distro's package manager.
-#### Arch / SteamOS
+#### Arch
 ```bash
 sudo pacman -S rust gtk4 polkit base-devel git
 ```
@@ -55,30 +70,20 @@ sudo dnf install cargo rust make gcc pkg-config gtk4-devel git polkit
 ```bash
 sudo zypper install cargo rust make gcc pkg-config gtk4-devel git polkit
 ```
-### Installation
-#### Arch (AUR)
 
-For Arch Linux users, install from the AUR using your preferred AUR helper:
-```bash
-# Using yay
-yay -S make-your-choice
-
-# Using paru
-paru -S make-your-choice
-
-# Using pikaur
-pikaur -S make-your-choice
-```
-
-#### Other Linux Distros (Build and Install from Source)
-
+### Build & Install
 Clone and install using Makefile:
 ```bash
 cd ~/ && git clone https://github.com/laewliet/make-your-choice.git
-cd make-your-choice/linux && make install
+cd make-your-choice/linux/makefile && make install
 cd ~/ && rm -rf ~/make-your-choice
 ```
 After installation, the clone will be removed.
+
+## Method 3: Precompiled Binary
+This option won't provide desktop entries to easily access the app. Use this only if you have no other options available. No prerequisites are required. Simply download the binary from the [Releases](https://github.com/laewliet/make-your-choice/releases/latest) page and run it.
+
+This option is recommended if you have a SteamOS device.
 
 
 # Screenshots

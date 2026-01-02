@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using System.Text.Json;
 using System.Linq;
 using System.Reflection;
+using Svg;
 using YamlDotNet.Serialization;
 
 namespace MakeYourChoice
@@ -220,11 +221,11 @@ namespace MakeYourChoice
 
             try
             {
-                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-                client.DefaultRequestHeaders.Add("User-Agent", "MakeYourChoice");
-                var response = await client.GetStringAsync(url);
-                var json = JsonSerializer.Deserialize<JsonElement>(response);
-                if (json.TryGetProperty("login", out var login))
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("MakeYourChoice/1.0");
+                using var stream = await client.GetStreamAsync(url);
+                using var doc = await JsonDocument.ParseAsync(stream);
+                if (doc.RootElement.TryGetProperty("login", out var login))
                 {
                     Developer = login.GetString();
                 }
@@ -251,13 +252,31 @@ namespace MakeYourChoice
             _menuStrip = new MenuStrip();
 
             var mSource = new ToolStripMenuItem(CurrentVersion);
+
+            // Load star icon from SVG
+            Bitmap starIcon = null;
+            try
+            {
+                var starSvgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "star.svg");
+                if (File.Exists(starSvgPath))
+                {
+                    var svgDocument = Svg.SvgDocument.Open(starSvgPath);
+                    starIcon = svgDocument.Draw(16, 16);
+                }
+            }
+            catch { /* ignore */ }
+
             var miRepo  = new ToolStripMenuItem("Repository");
+            if (starIcon != null)
+            {
+                miRepo.Image = starIcon;
+            }
             miRepo.Click += (_,__) =>
             {
                 if (RepoUrl == null)
                 {
                     MessageBox.Show(
-                        "Unable to open repository.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.",
+                        "Unable to open repository.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search.",
                         "Repository",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
@@ -265,7 +284,16 @@ namespace MakeYourChoice
                 }
                 else
                 {
-                    OpenUrl(RepoUrl);
+                    var result = MessageBox.Show(
+                        "Pressing \"OK\" will open the project's public repository.\n\nPlease star the repository if you are able to do so as it increases awareness of the project! <3",
+                        "Repository",
+                        MessageBoxButtons.OKCancel,
+                        MessageBoxIcon.Information
+                    );
+                    if (result == DialogResult.OK)
+                    {
+                        OpenUrl(RepoUrl);
+                    }
                 }
             };
             var miAbout   = new ToolStripMenuItem("About");
@@ -402,33 +430,38 @@ namespace MakeYourChoice
         {
             if (Developer == null)
             {
-                if (!silent)
-                {
-                    MessageBox.Show(
-                        "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.",
-                        "Check For Updates",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning
-                    );
-                }
+                // Always notify if identity fetch failed, even if silent
+                MessageBox.Show(
+                    "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search.",
+                    "Check For Updates",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
                 return;
             }
 
             try
             {
                 using var client = new HttpClient();
-                client.DefaultRequestHeaders.Add("User-Agent", "MakeYourChoice");
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("MakeYourChoice/1.0");
                 // fetch all releases
                 var url = $"https://api.github.com/repos/{Developer}/{Repo}/releases";
-                var releases = await client.GetFromJsonAsync<List<Release>>(url);
-                if (releases == null || releases.Count == 0)
+                
+                using var stream = await client.GetStreamAsync(url);
+                using var doc = await JsonDocument.ParseAsync(stream);
+                var root = doc.RootElement;
+
+                if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
                 {
-                    MessageBox.Show("No releases found.", "Check For Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (!silent)
+                    {
+                        MessageBox.Show("No releases found.", "Check For Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
                     return;
                 }
 
                 // assume first is latest (API returns newest first)
-                var latest = releases[0].TagName;
+                var latest = root[0].GetProperty("tag_name").GetString();
                 if (string.Equals(latest, CurrentVersion, StringComparison.OrdinalIgnoreCase))
                 {
                     if (!silent)
@@ -455,20 +488,16 @@ namespace MakeYourChoice
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    "Error while checking for updates:\n" + ex.Message,
-                    "Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
+                if (!silent)
+                {
+                    MessageBox.Show(
+                        "Error while checking for updates:\n" + ex.Message,
+                        "Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+                }
             }
-        }
-
-        // helper DTO for JSON deserialization
-        private class Release
-        {
-            [JsonPropertyName("tag_name")]
-            public string TagName { get; set; }
         }
 
         private void StartPingTimer()
@@ -1151,7 +1180,7 @@ namespace MakeYourChoice
 
             var lblVersion = new Label
             {
-                Text     = $"Version {CurrentVersion}\nWindows 7 or higher.",
+                Text     = $"Version {CurrentVersion}\nWindows 10 or higher.",
                 Font     = new Font(Font.FontFamily, 8, FontStyle.Italic),
                 AutoSize = true,
                 Location = new Point(20, lblDeveloper.Bottom + 10)
@@ -1169,7 +1198,7 @@ namespace MakeYourChoice
             // Copyright notice
             var lblCopyright = new Label
             {
-                Text     = "Copyright © 2025",
+                Text     = "Copyright © 2026",
                 Font     = new Font(Font.FontFamily, 8),
                 AutoSize = true,
                 Location = new Point(20, separator.Bottom + 15)

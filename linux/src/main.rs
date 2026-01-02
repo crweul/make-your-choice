@@ -562,7 +562,7 @@ fn build_ui(app: &Application) {
 fn create_version_menu(_window: &ApplicationWindow, _app_state: &Rc<AppState>) -> Menu {
     let menu = Menu::new();
     menu.append(Some("Check for updates"), Some("app.check-updates"));
-    menu.append(Some("Repository"), Some("app.repository"));
+    menu.append(Some("Repository (⭐)"), Some("app.repository"));
     menu.append(Some("About"), Some("app.about"));
     menu.append(Some("Open hosts file location"), Some("app.open-hosts"));
     menu.append(Some("Reset hosts file"), Some("app.reset-hosts"));
@@ -597,12 +597,36 @@ fn setup_menu_actions(app: &Application, window: &ApplicationWindow, app_state: 
     let window_clone = window.clone();
     action.connect_activate(move |_, _| {
         if let Some(url) = &repo_url {
-            open_url(url);
+            let dialog = MessageDialog::new(
+                Some(&window_clone),
+                gtk4::DialogFlags::MODAL,
+                MessageType::Info,
+                ButtonsType::OkCancel,
+                "Repository",
+            );
+            dialog.set_secondary_text(Some(
+                "Pressing \"Continue\" will open the project's public repository.\n\nPlease star the repository if you are able to do so as it increases awareness of the project! <3"
+            ));
+
+            // Change button labels
+            if let Some(widget) = dialog.widget_for_response(ResponseType::Ok) {
+                if let Some(button) = widget.downcast_ref::<Button>() {
+                    button.set_label("Continue");
+                }
+            }
+
+            let url_clone = url.clone();
+            dialog.run_async(move |dialog, response| {
+                if response == ResponseType::Ok {
+                    open_url(&url_clone);
+                }
+                dialog.close();
+            });
         } else {
             show_error_dialog(
                 &window_clone,
                 "Repository",
-                "Unable to open repository.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL."
+                "Unable to open repository.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search."
             );
         }
     });
@@ -671,7 +695,7 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
         show_error_dialog(
             &window,
             "Check For Updates",
-            "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL."
+            "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search."
         );
         return;
     }
@@ -726,6 +750,11 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
 fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow) {
     // Don't check silently if developer identity wasn't fetched
     if app_state.config.repo_url.is_none() {
+        show_error_dialog(
+            window,
+            "Check For Updates",
+            "Unable to check for updates.\n\nThe application was unable to fetch the git identity and therefore couldn't determine the repository URL.\n\nThis may be due to network issues or GitHub API issues.\nAn update to fix this issue has most likely been released, please check manually by joining the Discord server or doing a web search."
+        );
         return;
     }
 
@@ -819,7 +848,7 @@ fn show_about_dialog(app_state: &Rc<AppState>, window: &ApplicationWindow) {
     version.set_halign(gtk4::Align::Start);
 
     // Copyright notice
-    let copyright = Label::new(Some("Copyright © 2025"));
+    let copyright = Label::new(Some("Copyright © 2026"));
     copyright.set_halign(gtk4::Align::Start);
 
     // License information
