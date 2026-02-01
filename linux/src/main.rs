@@ -1608,16 +1608,39 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     let game_path_entry_for_browse = game_path_entry.clone();
     browse_button.connect_clicked(move |_| {
         let entry_clone = game_path_entry_for_browse.clone();
-        select_game_path(&parent_clone, move |path| {
+        let parent_for_dialog = parent_clone.clone();
+        let parent_for_error = parent_clone.clone();
+        select_game_path(&parent_for_dialog, move |path| {
+            if !is_valid_game_folder(&path) {
+                show_error_dialog(
+                    &parent_for_error,
+                    "Invalid game folder",
+                    "Please select the folder named \"Dead by Daylight\".",
+                );
+                return;
+            }
             entry_clone.set_text(path.to_string_lossy().as_ref());
         });
     });
 
     let app_state_clone = app_state.clone();
+    let parent_clone_for_save = parent.clone();
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Ok {
             // Apply button clicked
             let mut settings = app_state_clone.settings.lock().unwrap();
+
+            let game_path_text = game_path_entry.text().to_string();
+            if !game_path_text.trim().is_empty()
+                && !is_valid_game_folder(std::path::Path::new(game_path_text.trim()))
+            {
+                show_error_dialog(
+                    &parent_clone_for_save,
+                    "Invalid game folder",
+                    "Please select the folder named \"Dead by Daylight\".",
+                );
+                return;
+            }
 
             settings.apply_mode = match mode_combo.active() {
                 Some(1) => ApplyMode::UniversalRedirect,
@@ -1633,7 +1656,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             };
 
             settings.merge_unstable = merge_check.is_active();
-            settings.game_path = game_path_entry.text().to_string();
+            settings.game_path = game_path_text;
 
             let _ = settings.save();
 
@@ -1694,7 +1717,23 @@ fn get_saved_game_path(
         );
         return None;
     }
-    Some(std::path::PathBuf::from(game_path))
+    let path = std::path::PathBuf::from(game_path);
+    if !is_valid_game_folder(&path) {
+        show_error_dialog(
+            window,
+            "Invalid game folder",
+            "Please select the folder named 'Dead by Daylight'.",
+        );
+        return None;
+    }
+    Some(path)
+}
+
+fn is_valid_game_folder(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == "Dead by Daylight")
+        .unwrap_or(false)
 }
 
 fn show_info_dialog(parent: &ApplicationWindow, title: &str, message: &str) {

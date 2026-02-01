@@ -1682,7 +1682,18 @@ namespace MakeYourChoice
                 };
                 if (dialogFolder.ShowDialog(this) == DialogResult.OK)
                 {
-                    tbGamePath.Text = dialogFolder.SelectedPath;
+                    var selected = dialogFolder.SelectedPath;
+                    var name = Path.GetFileName(selected.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                    if (!string.Equals(name, "Dead by Daylight", StringComparison.Ordinal))
+                    {
+                        MessageBox.Show(
+                            "Please select the folder named \"Dead by Daylight\".",
+                            "Invalid game folder",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        return;
+                    }
+                    tbGamePath.Text = selected;
                 }
             };
             gamePanel.Controls.Add(tbGamePath);
@@ -1760,6 +1771,21 @@ namespace MakeYourChoice
 
             if (dialog.ShowDialog(this) == DialogResult.OK)
             {
+                var gamePathText = tbGamePath.Text?.Trim() ?? string.Empty;
+                if (!string.IsNullOrEmpty(gamePathText))
+                {
+                    var name = Path.GetFileName(gamePathText.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                    if (!string.Equals(name, "Dead by Daylight", StringComparison.Ordinal))
+                    {
+                        MessageBox.Show(
+                            "Please select the folder named \"Dead by Daylight\".",
+                            "Invalid game folder",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        return;
+                    }
+                }
+
                 _applyMode = cbApplyMode.SelectedIndex == 1 ? ApplyMode.UniversalRedirect : ApplyMode.Gatekeep;
                 if (_applyMode == ApplyMode.Gatekeep)
                 {
@@ -1768,7 +1794,7 @@ namespace MakeYourChoice
                     else                      _blockMode = BlockMode.OnlyService;
                 }
                 _mergeUnstable = cbMergeUnstable.Checked;
-                _gamePath = tbGamePath.Text?.Trim();
+                _gamePath = gamePathText;
                 SaveSettings();
                 UpdateRegionListViewAppearance();
             }
