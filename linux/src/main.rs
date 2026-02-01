@@ -9,9 +9,10 @@ use glib::Type;
 use gtk4::prelude::*;
 use gtk4::{
     gio, glib, pango, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
-    CellRendererText, CheckButton, ComboBoxText, Dialog, Label, ListStore, MenuButton,
-    MessageDialog, MessageType, Orientation, PolicyType, ResponseType, ScrolledWindow,
-    SelectionMode, Separator, TreeView, TreeViewColumn,
+    CellRendererText, CheckButton, ComboBoxText, Dialog, Entry, FileChooserAction,
+    FileChooserNative, FileFilter, Label, ListStore, MenuButton, MessageDialog, MessageType,
+    Orientation, PolicyType, ResponseType, ScrolledWindow, SelectionMode, Separator, TreeView,
+    TreeViewColumn,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -66,6 +67,7 @@ struct AppConfig {
 struct AppState {
     config: AppConfig,
     regions: HashMap<String, RegionInfo>,
+        blocked_regions: HashMap<String, RegionInfo>,
     settings: Arc<Mutex<UserSettings>>,
     hosts_manager: HostsManager,
     update_checker: UpdateChecker,
@@ -199,7 +201,8 @@ fn build_ui(app: &Application) {
         discord_url: "https://discord.gg/xEMyAA8gn8".to_string(),
     };
 
-    let regions = get_regions();
+    let regions = get_selectable_regions();
+        let blocked_regions = get_blocked_regions();
     let hosts_manager = HostsManager::new(config.discord_url.clone());
     let update_checker = UpdateChecker::new(
         config.developer.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -241,7 +244,7 @@ fn build_ui(app: &Application) {
     ]);
 
     // Group regions by category
-    let mut groups: HashMap<&str, Vec<(&String, &RegionInfo)>> = HashMap::new();
+    let mut groups: HashMap<&'static str, Vec<(&String, &RegionInfo)>> = HashMap::new();
     for (region_name, region_info) in &regions {
         let group_name = get_group_name(region_name);
         groups
@@ -401,6 +404,7 @@ fn build_ui(app: &Application) {
     let app_state = Rc::new(AppState {
         config: config.clone(),
         regions: regions.clone(),
+            blocked_regions: blocked_regions.clone(),
         settings: settings.clone(),
         hosts_manager,
         update_checker,
@@ -572,6 +576,11 @@ fn create_version_menu(_window: &ApplicationWindow, _app_state: &Rc<AppState>) -
 fn create_options_menu() -> Menu {
     let menu = Menu::new();
     menu.append(Some("Program settings"), Some("app.settings"));
+    menu.append(Some("Custom splash art"), Some("app.custom-splash"));
+    menu.append(
+        Some("Auto-skip loading screen trailer"),
+        Some("app.skip-trailer"),
+    );
     menu
 }
 
@@ -676,11 +685,361 @@ fn setup_menu_actions(app: &Application, window: &ApplicationWindow, app_state: 
         open_url(&discord_url);
     });
     app.add_action(&action);
+
+    // Custom splash art action
+    let action = SimpleAction::new("custom-splash", None);
+    let window_clone = window.clone();
+    let app_state_clone = app_state.clone();
+    action.connect_activate(move |_, _| {
+        show_custom_splash_dialog(&app_state_clone, &window_clone);
+    });
+    app.add_action(&action);
+
+    // Skip trailer action
+    let action = SimpleAction::new("skip-trailer", None);
+    let window_clone = window.clone();
+    let app_state_clone = app_state.clone();
+    action.connect_activate(move |_, _| {
+        show_skip_trailer_dialog(&app_state_clone, &window_clone);
+    });
+    app.add_action(&action);
+}
+
+fn show_custom_splash_dialog(app_state: &Rc<AppState>, window: &ApplicationWindow) {
+    let game_path = get_saved_game_path(app_state, window);
+    if game_path.is_none() {
+        return;
+    }
+    let game_path = game_path.unwrap();
+
+    let dialog = Dialog::with_buttons(
+        Some("Custom splash art"),
+        Some(window),
+        gtk4::DialogFlags::MODAL,
+        &[
+            ("Upload image…", ResponseType::Accept),
+            ("Revert to default", ResponseType::Reject),
+            ("Cancel", ResponseType::Cancel),
+        ],
+    );
+
+    dialog.set_default_width(420);
+
+    if let Some(action_area) = dialog.child().and_then(|c| c.last_child()) {
+        action_area.set_margin_start(15);
+        action_area.set_margin_end(15);
+        action_area.set_margin_top(10);
+        action_area.set_margin_bottom(15);
+    }
+
+    let content = dialog.content_area();
+    content.set_margin_start(15);
+    content.set_margin_end(15);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+
+    let description = Label::new(Some(
+        "This lets you use custom artwork for the EAC splash screen that pops up when you launch the game.",
+    ));
+    description.set_halign(gtk4::Align::Start);
+    description.set_wrap(true);
+    description.set_margin_top(5);
+    description.set_margin_bottom(10);
+    content.append(&description);
+    let info = Label::new(Some(
+        "Requirements:\n• PNG image\n• 800 x 450 pixels",
+    ));
+    info.set_halign(gtk4::Align::Start);
+    info.set_wrap(true);
+    info.set_margin_top(10);
+    info.set_margin_bottom(5);
+    content.append(&info);
+
+    let window_clone = window.clone();
+    dialog.connect_response(move |dialog, response| {
+        dialog.close();
+
+        match response {
+            ResponseType::Accept => {
+                let window_for_image = window_clone.clone();
+                let window_for_result_inner = window_clone.clone();
+                let game_path = game_path.clone();
+                select_image_file(&window_for_image, move |image_path| {
+                    if let Err(err) = apply_custom_splash(&game_path, &image_path) {
+                        show_error_dialog(
+                            &window_for_result_inner,
+                            "Custom splash art",
+                            &format!("Failed to apply custom splash art:\n{}", err),
+                        );
+                    } else {
+                        show_info_dialog(
+                            &window_for_result_inner,
+                            "Custom splash art",
+                            "Custom splash art applied.",
+                        );
+                    }
+                });
+            }
+            ResponseType::Reject => {
+                match revert_custom_splash(&game_path) {
+                    Ok(true) => show_info_dialog(
+                        &window_clone,
+                        "Custom splash art",
+                        "Reverted to default splash art.",
+                    ),
+                    Ok(false) => show_error_dialog(
+                        &window_clone,
+                        "Custom splash art",
+                        "No backup found to restore.",
+                    ),
+                    Err(err) => show_error_dialog(
+                        &window_clone,
+                        "Custom splash art",
+                        &format!("Failed to revert splash art:\n{}", err),
+                    ),
+                }
+            }
+            _ => {}
+        }
+    });
+
+    dialog.show();
+}
+
+fn show_skip_trailer_dialog(app_state: &Rc<AppState>, window: &ApplicationWindow) {
+    let game_path = get_saved_game_path(app_state, window);
+    if game_path.is_none() {
+        return;
+    }
+    let game_path = game_path.unwrap();
+
+    let dialog = Dialog::with_buttons(
+        Some("Auto-skip loading screen trailer"),
+        Some(window),
+        gtk4::DialogFlags::MODAL,
+        &[
+            ("Disable trailer", ResponseType::Accept),
+            ("Revert to default", ResponseType::Reject),
+            ("Cancel", ResponseType::Cancel),
+        ],
+    );
+
+    if let Some(action_area) = dialog.child().and_then(|c| c.last_child()) {
+        action_area.set_margin_start(15);
+        action_area.set_margin_end(15);
+        action_area.set_margin_top(10);
+        action_area.set_margin_bottom(15);
+    }
+
+    let content = dialog.content_area();
+    content.set_margin_start(15);
+    content.set_margin_end(15);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+
+    let description = Label::new(Some(
+        "This will automatically skip the current DbD chapter's trailer video that plays everytime you launch the game.",
+    ));
+    description.set_halign(gtk4::Align::Start);
+    description.set_wrap(true);
+    description.set_margin_top(5);
+    description.set_margin_bottom(10);
+    content.append(&description);
+
+    let window_clone = window.clone();
+    dialog.connect_response(move |dialog, response| {
+        dialog.close();
+
+        match response {
+            ResponseType::Accept => {
+                if let Err(err) = apply_skip_trailer(&game_path) {
+                    show_error_dialog(
+                        &window_clone,
+                        "Skip trailer",
+                        &format!("Failed to disable trailer:\n{}", err),
+                    );
+                } else {
+                    show_info_dialog(
+                        &window_clone,
+                        "Skip trailer",
+                        "Trailer disabled.",
+                    );
+                }
+            }
+            ResponseType::Reject => {
+                match revert_skip_trailer(&game_path) {
+                    Ok(true) => show_info_dialog(
+                        &window_clone,
+                        "Skip trailer",
+                        "Reverted to default trailer.",
+                    ),
+                    Ok(false) => show_error_dialog(
+                        &window_clone,
+                        "Skip trailer",
+                        "No backup found to restore.",
+                    ),
+                    Err(err) => show_error_dialog(
+                        &window_clone,
+                        "Skip trailer",
+                        &format!("Failed to revert trailer:\n{}", err),
+                    ),
+                }
+            }
+            _ => {}
+        }
+    });
+
+    dialog.show();
+}
+
+fn select_game_path<F: FnOnce(std::path::PathBuf) + 'static>(
+    window: &ApplicationWindow,
+    on_selected: F,
+) {
+    let dialog = FileChooserNative::new(
+        Some("Select game folder"),
+        Some(window),
+        FileChooserAction::SelectFolder,
+        Some("Select"),
+        Some("Cancel"),
+    );
+
+    let on_selected = Rc::new(RefCell::new(Some(on_selected)));
+    dialog.run_async(move |dialog, response| {
+        if response == ResponseType::Accept {
+            if let Some(file) = dialog.file() {
+                if let Some(path) = file.path() {
+                    if let Some(callback) = on_selected.borrow_mut().take() {
+                        callback(path);
+                    }
+                }
+            }
+        }
+        dialog.destroy();
+    });
+}
+
+fn select_image_file<F: FnOnce(std::path::PathBuf) + 'static>(
+    window: &ApplicationWindow,
+    on_selected: F,
+) {
+    let dialog = FileChooserNative::new(
+        Some("Select splash image (800x450)"),
+        Some(window),
+        FileChooserAction::Open,
+        Some("Open"),
+        Some("Cancel"),
+    );
+
+    let filter = FileFilter::new();
+    filter.add_mime_type("image/png");
+    filter.add_mime_type("image/jpeg");
+    filter.add_pattern("*.png");
+    filter.add_pattern("*.jpg");
+    filter.add_pattern("*.jpeg");
+    dialog.add_filter(&filter);
+
+    let on_selected = Rc::new(RefCell::new(Some(on_selected)));
+    dialog.run_async(move |dialog, response| {
+        if response == ResponseType::Accept {
+            if let Some(file) = dialog.file() {
+                if let Some(path) = file.path() {
+                    if let Some(callback) = on_selected.borrow_mut().take() {
+                        callback(path);
+                    }
+                }
+            }
+        }
+        dialog.destroy();
+    });
+}
+
+fn apply_custom_splash(game_path: &std::path::Path, image_path: &std::path::Path) -> anyhow::Result<()> {
+    let pixbuf = gtk4::gdk_pixbuf::Pixbuf::from_file(image_path)?;
+    if pixbuf.width() != 800 || pixbuf.height() != 450 {
+        anyhow::bail!("Image must be exactly 800x450 pixels.");
+    }
+
+    let target_dir = game_path.join("EasyAntiCheat");
+    let target_path = target_dir.join("SplashScreen.png");
+    let backup_path = target_dir.join("SplashScreen.png.bak");
+
+    std::fs::create_dir_all(&target_dir)?;
+    if backup_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+    if target_path.exists() {
+        std::fs::rename(&target_path, &backup_path)?;
+    }
+    std::fs::copy(image_path, &target_path)?;
+    Ok(())
+}
+
+fn revert_custom_splash(game_path: &std::path::Path) -> anyhow::Result<bool> {
+    let target_dir = game_path.join("EasyAntiCheat");
+    let target_path = target_dir.join("SplashScreen.png");
+    let backup_path = target_dir.join("SplashScreen.png.bak");
+
+    if !backup_path.exists() {
+        return Ok(false);
+    }
+    if target_path.exists() {
+        let _ = std::fs::remove_file(&target_path);
+    }
+    std::fs::rename(&backup_path, &target_path)?;
+    Ok(true)
+}
+
+fn apply_skip_trailer(game_path: &std::path::Path) -> anyhow::Result<()> {
+    let target_path = game_path
+        .join("DeadByDaylight")
+        .join("Content")
+        .join("Movies")
+        .join("LoadingScreen.bk2");
+    let backup_path = target_path.with_extension("bk2.bak");
+
+    if !target_path.exists() {
+        anyhow::bail!("LoadingScreen.bk2 not found.");
+    }
+    if backup_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+    std::fs::rename(&target_path, &backup_path)?;
+    Ok(())
+}
+
+fn revert_skip_trailer(game_path: &std::path::Path) -> anyhow::Result<bool> {
+    let target_path = game_path
+        .join("DeadByDaylight")
+        .join("Content")
+        .join("Movies")
+        .join("LoadingScreen.bk2");
+    let backup_path = target_path.with_extension("bk2.bak");
+
+    if !backup_path.exists() {
+        return Ok(false);
+    }
+    if target_path.exists() {
+        let _ = std::fs::remove_file(&target_path);
+    }
+    std::fs::rename(&backup_path, &target_path)?;
+    Ok(true)
 }
 
 fn open_url(url: &str) {
     // Use the `open` crate for cross-platform URL opening
     let _ = open::that(url);
+}
+
+fn get_all_regions_map(
+    selectable: &HashMap<String, RegionInfo>,
+    blocked: &HashMap<String, RegionInfo>,
+) -> HashMap<String, RegionInfo> {
+    let mut all = selectable.clone();
+    for (k, v) in blocked.iter() {
+        all.insert(k.clone(), v.clone());
+    }
+    all
 }
 
 fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow) {
@@ -1008,7 +1367,9 @@ fn show_conflict_dialog(
             dialog.close();
         } else {
             // Clear conflicts first, then apply
-            match app_state_clone.hosts_manager.detect_conflicting_entries(&app_state_clone.regions) {
+            match app_state_clone.hosts_manager.detect_conflicting_entries(
+                &get_all_regions_map(&app_state_clone.regions, &app_state_clone.blocked_regions),
+            ) {
                 Ok(conflicts) => {
                     if let Err(e) = app_state_clone.hosts_manager.clear_conflicting_entries(&conflicts) {
                         show_error_dialog(&window_clone, "Error", &format!("Failed to clear conflicting entries:\n{}", e));
@@ -1043,6 +1404,7 @@ fn apply_hosts_changes(
     let result = match apply_mode {
         ApplyMode::Gatekeep => app_state.hosts_manager.apply_gatekeep(
             &app_state.regions,
+            &app_state.blocked_regions,
             selected,
             block_mode,
             merge_unstable,
@@ -1059,7 +1421,7 @@ fn apply_hosts_changes(
             let region = selected.iter().next().unwrap();
             app_state
                 .hosts_manager
-                .apply_universal_redirect(&app_state.regions, region)
+                .apply_universal_redirect(&app_state.regions, &app_state.blocked_regions, region)
         }
     };
 
@@ -1085,7 +1447,9 @@ fn handle_apply_click(app_state: &Rc<AppState>, window: &ApplicationWindow) {
     let settings = app_state.settings.lock().unwrap();
 
     // Check for conflicting entries before proceeding
-    match app_state.hosts_manager.detect_conflicting_entries(&app_state.regions) {
+    match app_state.hosts_manager.detect_conflicting_entries(
+        &get_all_regions_map(&app_state.regions, &app_state.blocked_regions),
+    ) {
         Ok(conflicts) if !conflicts.is_empty() => {
             // Show conflict dialog and let it handle everything
             show_conflict_dialog(window, app_state, &selected, &settings);
@@ -1156,6 +1520,13 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     mode_combo.append_text("Gatekeep (default)");
     mode_combo.append_text("Universal Redirect (deprecated)");
 
+    let mode_notice = Label::new(Some(
+        "After changing this setting, reapply your selection to apply changes.",
+    ));
+    mode_notice.set_wrap(true);
+    mode_notice.set_max_width_chars(40);
+    mode_notice.set_halign(gtk4::Align::Start);
+
     let settings = app_state.settings.lock().unwrap();
     mode_combo.set_active(Some(match settings.apply_mode {
         ApplyMode::Gatekeep => 0,
@@ -1183,10 +1554,9 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     let merge_check = CheckButton::with_label("Merge unstable servers (recommended)");
     merge_check.set_active(settings.merge_unstable);
 
-    drop(settings);
-
     settings_box.append(&mode_label);
     settings_box.append(&mode_combo);
+    settings_box.append(&mode_notice);
     settings_box.append(&Separator::new(Orientation::Horizontal));
     settings_box.append(&block_label);
     settings_box.append(&rb_both);
@@ -1194,6 +1564,32 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&rb_service);
     settings_box.append(&Separator::new(Orientation::Horizontal));
     settings_box.append(&merge_check);
+    settings_box.append(&Separator::new(Orientation::Horizontal));
+
+    // Game folder
+    let game_path_label = Label::new(Some("Game folder:"));
+    game_path_label.set_halign(gtk4::Align::Start);
+    let game_path_entry = Entry::new();
+    game_path_entry.set_hexpand(true);
+    let browse_button = Button::with_label("Browse…");
+
+    let game_path_row = GtkBox::new(Orientation::Horizontal, 6);
+    game_path_row.append(&game_path_entry);
+    game_path_row.append(&browse_button);
+
+    let hint_label = Label::new(Some(
+        "Tip: In Steam, right-click Dead by Daylight → Manage → Browse local files.\nThe folder that opens is the one you should select.\n\nThis setting is only required for some features like custom splash art and auto-skip trailer.",
+    ));
+    hint_label.set_wrap(true);
+    hint_label.set_max_width_chars(40);
+    hint_label.set_halign(gtk4::Align::Start);
+
+    game_path_entry.set_text(&settings.game_path);
+    drop(settings);
+
+    settings_box.append(&game_path_label);
+    settings_box.append(&game_path_row);
+    settings_box.append(&hint_label);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Tip label
@@ -1208,11 +1604,43 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
 
     content.append(&settings_box);
 
+    let parent_clone = parent.clone();
+    let game_path_entry_for_browse = game_path_entry.clone();
+    browse_button.connect_clicked(move |_| {
+        let entry_clone = game_path_entry_for_browse.clone();
+        let parent_for_dialog = parent_clone.clone();
+        let parent_for_error = parent_clone.clone();
+        select_game_path(&parent_for_dialog, move |path| {
+            if !is_valid_game_folder(&path) {
+                show_error_dialog(
+                    &parent_for_error,
+                    "Invalid game folder",
+                    "Please select the folder named \"Dead by Daylight\".",
+                );
+                return;
+            }
+            entry_clone.set_text(path.to_string_lossy().as_ref());
+        });
+    });
+
     let app_state_clone = app_state.clone();
+    let parent_clone_for_save = parent.clone();
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Ok {
             // Apply button clicked
             let mut settings = app_state_clone.settings.lock().unwrap();
+
+            let game_path_text = game_path_entry.text().to_string();
+            if !game_path_text.trim().is_empty()
+                && !is_valid_game_folder(std::path::Path::new(game_path_text.trim()))
+            {
+                show_error_dialog(
+                    &parent_clone_for_save,
+                    "Invalid game folder",
+                    "Please select the folder named \"Dead by Daylight\".",
+                );
+                return;
+            }
 
             settings.apply_mode = match mode_combo.active() {
                 Some(1) => ApplyMode::UniversalRedirect,
@@ -1228,6 +1656,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             };
 
             settings.merge_unstable = merge_check.is_active();
+            settings.game_path = game_path_text;
 
             let _ = settings.save();
 
@@ -1247,10 +1676,12 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.apply_mode = ApplyMode::Gatekeep;
             settings.block_mode = BlockMode::Both;
             settings.merge_unstable = true;
+            settings.game_path.clear();
 
             let _ = settings.save();
 
             // Update UI controls to reflect defaults
+            game_path_entry.set_text("");
             mode_combo.set_active(Some(0));
             rb_both.set_active(true);
             merge_check.set_active(true);
@@ -1270,6 +1701,39 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     });
 
     dialog.show();
+}
+
+fn get_saved_game_path(
+    app_state: &Rc<AppState>,
+    window: &ApplicationWindow,
+) -> Option<std::path::PathBuf> {
+    let settings = app_state.settings.lock().unwrap();
+    let game_path = settings.game_path.trim();
+    if game_path.is_empty() {
+        show_info_dialog(
+            window,
+            "Game folder required",
+            "Please set the game folder in Options → Program settings.\n\nTip: In Steam, right-click Dead by Daylight → Manage → Browse local files. The folder that opens is the one you should select.",
+        );
+        return None;
+    }
+    let path = std::path::PathBuf::from(game_path);
+    if !is_valid_game_folder(&path) {
+        show_error_dialog(
+            window,
+            "Invalid game folder",
+            "Please select the folder named 'Dead by Daylight'.",
+        );
+        return None;
+    }
+    Some(path)
+}
+
+fn is_valid_game_folder(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == "Dead by Daylight")
+        .unwrap_or(false)
 }
 
 fn show_info_dialog(parent: &ApplicationWindow, title: &str, message: &str) {

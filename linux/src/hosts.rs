@@ -95,6 +95,7 @@ impl HostsManager {
     pub fn apply_gatekeep(
         &self,
         regions: &HashMap<String, RegionInfo>,
+        blocked_regions: &HashMap<String, RegionInfo>,
         selected: &HashSet<String>,
         block_mode: BlockMode,
         merge_unstable: bool,
@@ -150,6 +151,13 @@ impl HostsManager {
             content.push_str("\n");
         }
 
+        for (_region_key, region_info) in blocked_regions.iter() {
+            for host in &region_info.hosts {
+                content.push_str(&format!("{:9} {}\n", "0.0.0.0", host));
+            }
+            content.push_str("\n");
+        }
+
         self.write_wrapped_section(&content)?;
         Ok(())
     }
@@ -157,6 +165,7 @@ impl HostsManager {
     pub fn apply_universal_redirect(
         &self,
         regions: &HashMap<String, RegionInfo>,
+        blocked_regions: &HashMap<String, RegionInfo>,
         selected_region: &str,
     ) -> Result<()> {
         let region_info = regions.get(selected_region)
@@ -185,6 +194,13 @@ impl HostsManager {
                 let is_ping = host.to_lowercase().contains("ping");
                 let ip = if is_ping { &ping_ip } else { &service_ip };
                 content.push_str(&format!("{} {}\n", ip, host));
+            }
+            content.push_str("\n");
+        }
+
+        for (_, region_info) in blocked_regions.iter() {
+            for host in &region_info.hosts {
+                content.push_str(&format!("{} {}\n", "0.0.0.0", host));
             }
             content.push_str("\n");
         }

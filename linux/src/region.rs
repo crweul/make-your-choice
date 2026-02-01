@@ -20,7 +20,7 @@ pub enum BlockMode {
     OnlyService,
 }
 
-pub fn get_regions() -> HashMap<String, RegionInfo> {
+pub fn get_selectable_regions() -> HashMap<String, RegionInfo> {
     let mut regions = HashMap::new();
 
     // Europe
@@ -181,18 +181,110 @@ pub fn get_regions() -> HashMap<String, RegionInfo> {
         },
     );
 
-    // Mainland China
+    regions
+}
+
+// These regions are always blocked regardless of user choice. DbD doesn't use them so they're not shown in the UI. They are just blocked for stability purposes.
+pub fn get_blocked_regions() -> HashMap<String, RegionInfo> {
+    let mut regions = HashMap::new();
+
+    regions.insert(
+        "Africa (Cape Town)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.af-south-1.amazonaws.com".to_string(),
+                "gamelift-ping.af-south-1.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
+    regions.insert(
+        "Asia Pacific (Osaka)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.ap-northeast-3.amazonaws.com".to_string(),
+                "gamelift-ping.ap-northeast-3.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
+    regions.insert(
+        "Europe (Stockholm)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.eu-north-1.amazonaws.com".to_string(),
+                "gamelift-ping.eu-north-1.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
+    regions.insert(
+        "Europe (Paris)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.eu-west-3.amazonaws.com".to_string(),
+                "gamelift-ping.eu-west-3.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
+    regions.insert(
+        "Europe (Milan)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.eu-south-1.amazonaws.com".to_string(),
+                "gamelift-ping.eu-south-1.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
+    regions.insert(
+        "Middle East (Bahrain)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.me-south-1.amazonaws.com".to_string(),
+                "gamelift-ping.me-south-1.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
+    regions.insert(
+        "Asia Pacific (Malaysia)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.ap-southeast-5.amazonaws.com".to_string(),
+                "gamelift-ping.ap-southeast-5.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
+    regions.insert(
+        "Asia Pacific (Thailand)".to_string(),
+        RegionInfo {
+            hosts: vec![
+                "gamelift.ap-southeast-7.amazonaws.com".to_string(),
+                "gamelift-ping.ap-southeast-7.api.aws".to_string(),
+            ],
+            stable: true,
+        },
+    );
     regions.insert(
         "China (Beijing)".to_string(),
         RegionInfo {
-            hosts: vec!["gamelift.cn-north-1.amazonaws.com.cn".to_string()],
+            hosts: vec![
+                "gamelift.cn-north-1.amazonaws.com.cn".to_string(),
+                "gamelift-ping.cn-north-1.api.aws".to_string(),
+            ],
             stable: true,
         },
     );
     regions.insert(
         "China (Ningxia)".to_string(),
         RegionInfo {
-            hosts: vec!["gamelift.cn-northwest-1.amazonaws.com.cn".to_string()],
+            hosts: vec![
+                "gamelift.cn-northwest-1.amazonaws.com.cn".to_string(),
+                "gamelift-ping.cn-northwest-1.api.aws".to_string(),
+            ],
             stable: true,
         },
     );
