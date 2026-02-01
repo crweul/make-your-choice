@@ -117,6 +117,7 @@ namespace MakeYourChoice
         private enum BlockMode { Both, OnlyPing, OnlyService }
         private BlockMode _blockMode = BlockMode.Both;
         private bool _mergeUnstable = true;
+        private string _gamePath;
 
         // Tracks the last launched version for update message display
         private string _lastLaunchedVersion;
@@ -140,6 +141,7 @@ namespace MakeYourChoice
             public BlockMode BlockMode { get; set; }
             public bool MergeUnstable { get; set; } = true;
             public string LastLaunchedVersion { get; set; }
+            public string GamePath { get; set; }
         }
 
         private void LoadSettings()
@@ -160,6 +162,7 @@ namespace MakeYourChoice
                     _blockMode = settings.BlockMode;
                     _mergeUnstable = settings.MergeUnstable;
                     _lastLaunchedVersion = settings.LastLaunchedVersion;
+                    _gamePath = settings.GamePath;
                 }
             }
             catch
@@ -182,6 +185,7 @@ namespace MakeYourChoice
                     BlockMode = _blockMode,
                     MergeUnstable = _mergeUnstable,
                     LastLaunchedVersion = string.IsNullOrWhiteSpace(_lastLaunchedVersion) ? CurrentVersion : _lastLaunchedVersion,
+                    GamePath = _gamePath,
                 };
                 var serializer = new SerializerBuilder().Build();
                 var yaml = serializer.Serialize(settings);
@@ -325,6 +329,14 @@ namespace MakeYourChoice
             miSettings.Click += (_,__) => ShowSettingsDialog();
             mOptions.DropDownItems.Add(miSettings);
 
+            var mExtra = new ToolStripMenuItem("Extra");
+            var miCustomSplash = new ToolStripMenuItem("Custom splash art");
+            miCustomSplash.Click += (_, __) => HandleCustomSplashArt();
+            var miSkipTrailer = new ToolStripMenuItem("Auto-skip loading screen trailer");
+            miSkipTrailer.Click += (_, __) => HandleSkipTrailer();
+            mExtra.DropDownItems.Add(miCustomSplash);
+            mExtra.DropDownItems.Add(miSkipTrailer);
+
             var mHelp     = new ToolStripMenuItem("Help");
             var miDiscord = new ToolStripMenuItem("Discord (Get support)");
             miDiscord.Click += (_,__) => OpenUrl(DiscordUrl);
@@ -332,6 +344,7 @@ namespace MakeYourChoice
 
             _menuStrip.Items.Add(mSource);
             _menuStrip.Items.Add(mOptions);
+            _menuStrip.Items.Add(mExtra);
             _menuStrip.Items.Add(mHelp);
 
             // ── Tip label ────────────────────────────────────────────────
@@ -425,6 +438,254 @@ namespace MakeYourChoice
 
             Controls.Add(tlp);
         }
+
+        private void HandleCustomSplashArt()
+        {
+            var gamePath = _gamePath?.Trim();
+            if (string.IsNullOrWhiteSpace(gamePath))
+            {
+                MessageBox.Show(
+                    "Please set the game folder in Options → Program settings.\n\nTip: In Steam, right-click Dead by Daylight → Manage → Browse local files. The folder that opens is the one you should select.",
+                    "Game folder required",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            var choice = ShowCustomSplashPrompt();
+
+            if (choice == DialogResult.Yes)
+            {
+                using var ofd = new OpenFileDialog
+                {
+                    Title = "Select splash image (800x450)",
+                    Filter = "Image Files|*.png;*.jpg;*.jpeg;*.bmp",
+                    Multiselect = false
+                };
+                if (ofd.ShowDialog(this) != DialogResult.OK)
+                    return;
+
+                using var img = Image.FromFile(ofd.FileName);
+                if (img.Width != 800 || img.Height != 450)
+                {
+                    MessageBox.Show("Image must be exactly 800x450 pixels.", "Custom splash art", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                try
+                {
+                    var targetDir = Path.Combine(gamePath, "EasyAntiCheat");
+                    var targetPath = Path.Combine(targetDir, "SplashScreen.png");
+                    var backupPath = targetPath + ".bak";
+                    Directory.CreateDirectory(targetDir);
+                    if (File.Exists(backupPath)) File.Delete(backupPath);
+                    if (File.Exists(targetPath)) File.Move(targetPath, backupPath);
+                    File.Copy(ofd.FileName, targetPath, true);
+                    MessageBox.Show("Custom splash art applied.", "Custom splash art", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to apply custom splash art:\n{ex.Message}", "Custom splash art", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            else if (choice == DialogResult.No)
+            {
+                try
+                {
+                    var targetPath = Path.Combine(gamePath, "EasyAntiCheat", "SplashScreen.png");
+                    var backupPath = targetPath + ".bak";
+                    if (!File.Exists(backupPath))
+                    {
+                        MessageBox.Show("No backup found to restore.", "Custom splash art", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (File.Exists(targetPath)) File.Delete(targetPath);
+                    File.Move(backupPath, targetPath);
+                    MessageBox.Show("Reverted to default splash art.", "Custom splash art", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to revert splash art:\n{ex.Message}", "Custom splash art", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private DialogResult ShowCustomSplashPrompt()
+        {
+            using var dialog = new Form
+            {
+                Text = "Custom splash art",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(420, 210),
+                MaximizeBox = false,
+                MinimizeBox = false,
+                ShowInTaskbar = false,
+                Padding = new Padding(10)
+            };
+
+            var lblInfo = new Label
+            {
+                Text = "This lets you use custom artwork for the EAC splash screen that pops up when you launch the game.\n\nRequirements:\n• PNG image\n• 800 x 450 pixels\n\nChoose Upload to select an image, or Revert to restore default.",
+                AutoSize = true,
+                MaximumSize = new Size(390, 0),
+                Location = new Point(10, 10)
+            };
+
+            var btnUpload = new Button
+            {
+                Text = "Upload image…",
+                DialogResult = DialogResult.Yes,
+                AutoSize = true
+            };
+            var btnRevert = new Button
+            {
+                Text = "Revert to default",
+                DialogResult = DialogResult.No,
+                AutoSize = true
+            };
+            var btnCancel = new Button
+            {
+                Text = "Cancel",
+                DialogResult = DialogResult.Cancel,
+                AutoSize = true
+            };
+
+            var buttonPanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.RightToLeft,
+                Dock = DockStyle.Bottom,
+                AutoSize = true,
+                Padding = new Padding(0, 10, 0, 0)
+            };
+            buttonPanel.Controls.Add(btnCancel);
+            buttonPanel.Controls.Add(btnRevert);
+            buttonPanel.Controls.Add(btnUpload);
+
+            dialog.Controls.Add(lblInfo);
+            dialog.Controls.Add(buttonPanel);
+            dialog.AcceptButton = btnUpload;
+            dialog.CancelButton = btnCancel;
+
+            return dialog.ShowDialog(this);
+        }
+
+        private void HandleSkipTrailer()
+        {
+            var gamePath = _gamePath?.Trim();
+            if (string.IsNullOrWhiteSpace(gamePath))
+            {
+                MessageBox.Show(
+                    "Please set the game folder in Options → Program settings.\n\nTip: In Steam, right-click Dead by Daylight → Manage → Browse local files. The folder that opens is the one you should select.",
+                    "Game folder required",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            var choice = ShowSkipTrailerPrompt();
+
+            var targetPath = Path.Combine(gamePath, "DeadByDaylight", "Content", "Movies", "LoadingScreen.bk2");
+            var backupPath = targetPath + ".bak";
+
+            if (choice == DialogResult.Yes)
+            {
+                try
+                {
+                    if (!File.Exists(targetPath))
+                    {
+                        MessageBox.Show("LoadingScreen.bk2 not found.", "Auto-skip", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (File.Exists(backupPath)) File.Delete(backupPath);
+                    File.Move(targetPath, backupPath);
+                    MessageBox.Show("Loading screen trailer will be skipped.", "Auto-skip", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to enable auto-skip:\n{ex.Message}", "Auto-skip", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            else if (choice == DialogResult.No)
+            {
+                try
+                {
+                    if (!File.Exists(backupPath))
+                    {
+                        MessageBox.Show("No backup found to restore.", "Auto-skip", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (File.Exists(targetPath)) File.Delete(targetPath);
+                    File.Move(backupPath, targetPath);
+                    MessageBox.Show("Reverted to default trailer.", "Auto-skip", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to revert trailer:\n{ex.Message}", "Auto-skip", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private DialogResult ShowSkipTrailerPrompt()
+        {
+            using var dialog = new Form
+            {
+                Text = "Auto-skip loading screen trailer",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                ClientSize = new Size(420, 170),
+                MaximizeBox = false,
+                MinimizeBox = false,
+                ShowInTaskbar = false,
+                Padding = new Padding(10)
+            };
+
+            var lblInfo = new Label
+            {
+                Text = "This will automatically skip the current DbD chapter's trailer video that plays everytime you launch the game.\n\nChoose Enable to turn this on, or Revert to restore default.",
+                AutoSize = true,
+                MaximumSize = new Size(390, 0),
+                Location = new Point(10, 10)
+            };
+
+            var btnEnable = new Button
+            {
+                Text = "Enable",
+                DialogResult = DialogResult.Yes,
+                AutoSize = true
+            };
+            var btnRevert = new Button
+            {
+                Text = "Revert to default",
+                DialogResult = DialogResult.No,
+                AutoSize = true
+            };
+            var btnCancel = new Button
+            {
+                Text = "Cancel",
+                DialogResult = DialogResult.Cancel,
+                AutoSize = true
+            };
+
+            var buttonPanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.RightToLeft,
+                Dock = DockStyle.Bottom,
+                AutoSize = true,
+                Padding = new Padding(0, 10, 0, 0)
+            };
+            buttonPanel.Controls.Add(btnCancel);
+            buttonPanel.Controls.Add(btnRevert);
+            buttonPanel.Controls.Add(btnEnable);
+
+            dialog.Controls.Add(lblInfo);
+            dialog.Controls.Add(buttonPanel);
+            dialog.AcceptButton = btnEnable;
+            dialog.CancelButton = btnCancel;
+
+            return dialog.ShowDialog(this);
+        }
+
 
         private async Task CheckForUpdatesAsync(bool silent)
         {
@@ -1257,11 +1518,54 @@ namespace MakeYourChoice
                 AutoSizeMode    = AutoSizeMode.GrowAndShrink
             };
 
+            // ── Game folder ────────────────────────────────────────────
+            var gamePanel = new GroupBox
+            {
+                Text = "Game Folder",
+                Location = new Point(10, 10),
+                Size = new Size(320, 90)
+            };
+            var tbGamePath = new TextBox
+            {
+                Location = new Point(8, 22),
+                Width = 230,
+                Text = _gamePath ?? string.Empty
+            };
+            var btnBrowse = new Button
+            {
+                Text = "Browse…",
+                Location = new Point(tbGamePath.Right + 5, 20),
+                AutoSize = true
+            };
+            var lblGameHint = new Label
+            {
+                Text = "Tip: In Steam, right-click Dead by Daylight → Manage → Browse local files. The folder that opens is the one you should select.",
+                AutoSize = true,
+                MaximumSize = new Size(300, 0),
+                Location = new Point(8, tbGamePath.Bottom + 6)
+            };
+            btnBrowse.Click += (_, __) =>
+            {
+                using var dialogFolder = new FolderBrowserDialog
+                {
+                    Description = "Select the game install folder",
+                    UseDescriptionForTitle = true,
+                    ShowNewFolderButton = false
+                };
+                if (dialogFolder.ShowDialog(this) == DialogResult.OK)
+                {
+                    tbGamePath.Text = dialogFolder.SelectedPath;
+                }
+            };
+            gamePanel.Controls.Add(tbGamePath);
+            gamePanel.Controls.Add(btnBrowse);
+            gamePanel.Controls.Add(lblGameHint);
+
             // ── Mode selection ─────────────────────────────────────────
             var modePanel = new GroupBox
             {
                 Text     = "Method",
-                Location = new Point(10, 10),
+                Location = new Point(10, gamePanel.Bottom + 10),
                 Size     = new Size(320, 60)
             };
             var cbApplyMode = new ComboBox
@@ -1375,6 +1679,7 @@ namespace MakeYourChoice
                 cbApplyMode.SelectedIndex = 0;
                 rbBoth.Checked = true;
                 cbMergeUnstable.Checked = true;
+                tbGamePath.Text = string.Empty;
             };
 
             // ── TableLayoutPanel for dynamic layout ──────────────────────────
@@ -1384,18 +1689,20 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 5,
+                RowCount = 6,
             };
             tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-            tlpSettings.Controls.Add(modePanel,       0, 0);
-            tlpSettings.Controls.Add(blockPanel,      0, 1);
-            tlpSettings.Controls.Add(miscPanel,      0, 2);
-            tlpSettings.Controls.Add(lblTipSettings,  0, 3);
+            tlpSettings.Controls.Add(gamePanel,      0, 0);
+            tlpSettings.Controls.Add(modePanel,      0, 1);
+            tlpSettings.Controls.Add(blockPanel,     0, 2);
+            tlpSettings.Controls.Add(miscPanel,      0, 3);
+            tlpSettings.Controls.Add(lblTipSettings, 0, 4);
             var buttonPanel = new FlowLayoutPanel
             {
                 FlowDirection = FlowDirection.RightToLeft,
@@ -1404,7 +1711,7 @@ namespace MakeYourChoice
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
-            tlpSettings.Controls.Add(buttonPanel, 0, 4);
+            tlpSettings.Controls.Add(buttonPanel, 0, 5);
 
             dialog.Controls.Add(tlpSettings);
             dialog.AcceptButton = btnOk;
@@ -1419,6 +1726,7 @@ namespace MakeYourChoice
                     else                      _blockMode = BlockMode.OnlyService;
                 }
                 _mergeUnstable = cbMergeUnstable.Checked;
+                _gamePath = tbGamePath.Text?.Trim();
                 SaveSettings();
                 UpdateRegionListViewAppearance();
             }
