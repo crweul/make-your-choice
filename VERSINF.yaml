@@ -1,9 +1,6 @@
 version: v2.4.0
 notes:
-  - Migrated to .NET 10 for Windows
-  - Added various binary file size optimizations for Windows
-  - Added a cute star symbol to the repository button
-  - Fixed git identity fetch error messages to provide more context and troubleshooting steps
-  - Enhanced git identity fetch feedback in case of potential future API changes
-  - Linux now has a precompiled binary release
-  - SteamOS support!
+  -  Added an option to set a custom splash screen image when launching Dead by Daylight.
+  -  Added an option to automatically skip the chapter trailer after loading the game.
+  -  Added an option in settings to set a game folder for Dead by Daylight.
+  -  Reworked the endpoints for some regions.
