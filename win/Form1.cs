@@ -132,6 +132,7 @@ namespace MakeYourChoice
 
         // Tracks the last launched version for update message display
         private string _lastLaunchedVersion;
+        private string _autoUpdateCheckPausedUntil;
 
         // Path for saving user settings
         private static string SettingsFilePath =>
@@ -153,6 +154,7 @@ namespace MakeYourChoice
             public bool MergeUnstable { get; set; } = true;
             public string LastLaunchedVersion { get; set; }
             public string GamePath { get; set; }
+            public string AutoUpdateCheckPausedUntil { get; set; }
         }
 
         private void LoadSettings()
@@ -174,6 +176,7 @@ namespace MakeYourChoice
                     _mergeUnstable = settings.MergeUnstable;
                     _lastLaunchedVersion = settings.LastLaunchedVersion;
                     _gamePath = settings.GamePath;
+                    _autoUpdateCheckPausedUntil = settings.AutoUpdateCheckPausedUntil;
                 }
             }
             catch
@@ -197,6 +200,7 @@ namespace MakeYourChoice
                     MergeUnstable = _mergeUnstable,
                     LastLaunchedVersion = string.IsNullOrWhiteSpace(_lastLaunchedVersion) ? CurrentVersion : _lastLaunchedVersion,
                     GamePath = _gamePath,
+                    AutoUpdateCheckPausedUntil = _autoUpdateCheckPausedUntil,
                 };
                 var serializer = new SerializerBuilder().Build();
                 var yaml = serializer.Serialize(settings);
@@ -224,6 +228,7 @@ namespace MakeYourChoice
             {
                 MessageBox.Show(UpdateMessage, $"What's new in {CurrentVersion}", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 _lastLaunchedVersion = CurrentVersion;
+                _autoUpdateCheckPausedUntil = null;
                 SaveSettings();
             }
             UpdateRegionListViewAppearance();
@@ -697,6 +702,13 @@ namespace MakeYourChoice
 
         private async Task CheckForUpdatesAsync(bool silent)
         {
+            if (silent && !string.IsNullOrEmpty(_autoUpdateCheckPausedUntil) 
+                && DateTime.TryParse(_autoUpdateCheckPausedUntil, out var pausedUntil) 
+                && DateTime.Now < pausedUntil)
+            {
+                return;
+            }
+
             if (Developer == null)
             {
                 // Always notify if identity fetch failed, even if silent
@@ -745,14 +757,19 @@ namespace MakeYourChoice
                 }
                 else
                 {
-                    var resp = MessageBox.Show(
-                        $"A new version is available: {latest}.\nWould you like to update?\n\nYour version: {CurrentVersion}.",
-                        "Update Available",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Question
-                    );
-                    if (resp == DialogResult.Yes)
-                        OpenUrl($"https://github.com/{Developer}/{Repo}/releases/latest");
+                    using var prompt = new UpdatePrompt(latest, CurrentVersion);
+                    if (prompt.ShowDialog(this) == DialogResult.OK)
+                    {
+                        if (prompt.SelectedAction == UpdatePrompt.ValidUpdateAction.UpdateNow)
+                        {
+                            OpenUrl($"https://github.com/{Developer}/{Repo}/releases/latest");
+                        }
+                        else
+                        {
+                            _autoUpdateCheckPausedUntil = DateTime.Now.AddDays(prompt.DaysToWait).ToString("o");
+                            SaveSettings();
+                        }
+                    }
                 }
             }
             catch (Exception ex)
@@ -1540,98 +1557,122 @@ namespace MakeYourChoice
         {
             var dialog = new Form
             {
-                Text            = "Program Settings",
+                Text = "Program Settings",
                 FormBorderStyle = FormBorderStyle.FixedDialog,
-                StartPosition   = FormStartPosition.CenterParent,
-                MaximizeBox     = false,
-                MinimizeBox     = false,
-                ShowInTaskbar   = false,
-                Padding         = new Padding(18),
-                AutoSize        = true,
-                AutoSizeMode    = AutoSizeMode.GrowAndShrink
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false,
+                MinimizeBox = false,
+                ShowInTaskbar = false,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(12)
+            };
+
+            var tlpMain = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 5,
+                Padding = new Padding(0)
             };
 
             // ── Mode selection ─────────────────────────────────────────
             var modePanel = new GroupBox
             {
-                Text     = "Method",
-                Location = new Point(10, 10),
-                Size     = new Size(330, 110)
+                Text = "Method",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10),
+                Dock = DockStyle.Fill
+            };
+            var tlpMode = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 2
             };
             var cbApplyMode = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Location      = new Point(8, 20),
-                Width         = 310
+                Width = 320,
+                Margin = new Padding(3, 3, 3, 10)
             };
-            // populate mode choices
             cbApplyMode.Items.AddRange(new[] { "Gatekeep (default)", "Universal Redirect (deprecated)" });
             cbApplyMode.SelectedIndex = _applyMode == ApplyMode.UniversalRedirect ? 1 : 0;
-            modePanel.Controls.Add(cbApplyMode);
-
+            
             var lblModeNotice = new Label
             {
                 Text = "After changing this setting, reapply your selection to apply changes.",
                 AutoSize = true,
-                MaximumSize = new Size(310, 0),
-                Location = new Point(8, cbApplyMode.Bottom + 6)
+                MaximumSize = new Size(320, 0),
+                Padding = new Padding(0, 0, 0, 5)
             };
-            modePanel.Height = lblModeNotice.Bottom + 32;
-            modePanel.Controls.Add(lblModeNotice);
+            tlpMode.Controls.Add(cbApplyMode, 0, 0);
+            tlpMode.Controls.Add(lblModeNotice, 0, 1);
+            modePanel.Controls.Add(tlpMode);
 
+
+            // ── Gatekeep Options ──────────────────────────────────────
             var blockPanel = new GroupBox
             {
-                Text     = "Gatekeep Options",
-                Location = new Point(10, modePanel.Bottom + 10),
-                Width    = 320,
-                Height   = 110,
-                Padding  = new Padding(10)
+                Text = "Gatekeep Options",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowOnly,
+                Padding = new Padding(10),
+                Dock = DockStyle.Fill
             };
-            var rbBoth = new RadioButton { Text = "Block both (default)", Location = new Point(10, 20), AutoSize = true };
-            var rbPing = new RadioButton { Text = "Block UDP ping beacon endpoints", Location = new Point(10, rbBoth.Bottom + 5), AutoSize = true };
-            var rbService = new RadioButton { Text = "Block service endpoints", Location = new Point(10, rbPing.Bottom + 5), AutoSize = true };
-            blockPanel.Controls.AddRange(new Control[] { rbBoth, rbPing, rbService });
-
-            // Initialize selections
-            rbBoth.Checked    = _blockMode == BlockMode.Both;
-            rbPing.Checked    = _blockMode == BlockMode.OnlyPing;
-            rbService.Checked = _blockMode == BlockMode.OnlyService;
-            blockPanel.Enabled = (_applyMode == ApplyMode.Gatekeep);
-
-
-            // ── Merge unstable servers panel ─────────────────────────────
-            var miscPanel = new GroupBox
+            var tlpBlock = new TableLayoutPanel
             {
-                Text = "Misc Options",
-                Width = 320,
-                Height = 50,
-                Padding = new Padding(10)
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 4
             };
+
+            var rbBoth = new RadioButton { Text = "Block both (default)", AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
+            var rbPing = new RadioButton { Text = "Block UDP ping beacon endpoints", AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
+            var rbService = new RadioButton { Text = "Block service endpoints", AutoSize = true, Margin = new Padding(3, 3, 3, 10) };
+            
             var cbMergeUnstable = new CheckBox
             {
-                Location = new Point(10, 20),
                 Text = "Merge unstable servers (recommended)…",
                 AutoSize = true,
                 Checked = _mergeUnstable,
-                MaximumSize = new Size(300, 0)
+                MaximumSize = new Size(320, 0),
+                Margin = new Padding(3, 5, 3, 3)
             };
-            miscPanel.Controls.Add(cbMergeUnstable);
             var toolTipMerge = new ToolTip();
-            toolTipMerge.SetToolTip(cbMergeUnstable,
-                "Merge unstable servers with a stable alternative. (recommended)");
-            // Disable merge option when not in Gatekeep mode
-            cbMergeUnstable.Enabled = cbApplyMode.SelectedIndex == 0;
-            // Toggle blockPanel and merge checkbox enabled state based on apply mode
+            toolTipMerge.SetToolTip(cbMergeUnstable, "Merge unstable servers with a stable alternative. (recommended)");
+
+            tlpBlock.Controls.Add(rbBoth, 0, 0);
+            tlpBlock.Controls.Add(rbPing, 0, 1);
+            tlpBlock.Controls.Add(rbService, 0, 2);
+            tlpBlock.Controls.Add(cbMergeUnstable, 0, 3);
+            blockPanel.Controls.Add(tlpBlock);
+
+            // Initialize selections
+            rbBoth.Checked = _blockMode == BlockMode.Both;
+            rbPing.Checked = _blockMode == BlockMode.OnlyPing;
+            rbService.Checked = _blockMode == BlockMode.OnlyService;
+
+            // Logic for enabling/disabling controls
             cbApplyMode.SelectedIndexChanged += (s, e) =>
             {
                 bool isGatekeep = cbApplyMode.SelectedIndex == 0;
                 blockPanel.Enabled = isGatekeep;
-                cbMergeUnstable.Enabled = isGatekeep;
             };
+            blockPanel.Enabled = (cbApplyMode.SelectedIndex == 0);
+
+
             // Confirm before disabling merge option
             cbMergeUnstable.CheckedChanged += (s, e) =>
             {
-                if (!cbMergeUnstable.Checked)
+                if (!cbMergeUnstable.Checked && blockPanel.Enabled)
                 {
                     var message = "Disabling this option means no stable alternative will be automatically set, " +
                                   "this will most likely cause severe latency issues. Are you sure you want to disable this?";
@@ -1647,31 +1688,44 @@ namespace MakeYourChoice
                 }
             };
 
+
             // ── Game folder ────────────────────────────────────────────
             var gamePanel = new GroupBox
             {
                 Text = "Game Folder",
-                Size = new Size(320, 95)
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10),
+                Dock = DockStyle.Fill
             };
+            var tlpGame = new TableLayoutPanel {
+                 Dock = DockStyle.Fill,
+                 AutoSize = true, 
+                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                 ColumnCount = 2,
+                 RowCount = 2
+            };
+
             var tbGamePath = new TextBox
             {
-                Location = new Point(8, 22),
-                Width = 230,
-                Text = _gamePath ?? string.Empty
+                Text = _gamePath ?? string.Empty,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(3, 5, 3, 3)
             };
             var btnBrowse = new Button
             {
                 Text = "Browse…",
-                Location = new Point(tbGamePath.Right + 5, 20),
-                AutoSize = true
+                AutoSize = true,
+                Margin = new Padding(3, 3, 3, 3)
             };
             var lblGameHint = new Label
             {
                 Text = "Tip: In Steam, right-click Dead by Daylight → Manage → Browse local files. The folder that opens is the one you should select.",
                 AutoSize = true,
-                MaximumSize = new Size(300, 0),
-                Location = new Point(8, tbGamePath.Bottom + 6)
+                MaximumSize = new Size(320, 0),
+                Padding = new Padding(0, 5, 0, 0)
             };
+
             btnBrowse.Click += (_, __) =>
             {
                 using var dialogFolder = new FolderBrowserDialog
@@ -1696,77 +1750,62 @@ namespace MakeYourChoice
                     tbGamePath.Text = selected;
                 }
             };
-            gamePanel.Controls.Add(tbGamePath);
-            gamePanel.Controls.Add(btnBrowse);
-            gamePanel.Controls.Add(lblGameHint);
+            
+            tlpGame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            tlpGame.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            
+            tlpGame.Controls.Add(tbGamePath, 0, 0);
+            tlpGame.Controls.Add(btnBrowse, 1, 0);
+            tlpGame.Controls.Add(lblGameHint, 0, 1);
+            tlpGame.SetColumnSpan(lblGameHint, 2);
+            gamePanel.Controls.Add(tlpGame);
 
-            // ── Tip label for settings ────────────────────────────────────────
+
+            // ── Footer ────────────────────────────────────────────────
             var lblTipSettings = new Label
             {
                 Text = "The default options are recommended. You may not want to change these if you aren't sure of what you are doing. Your experience may vary by using settings other than the default.",
                 AutoSize = true,
-                MaximumSize = new Size(320, 0),
-                TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(5),
-                Margin = new Padding(0, 0, 0, 10)
+                MaximumSize = new Size(350, 0),
+                Padding = new Padding(0, 5, 0, 10)
             };
 
+            var buttonPanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.RightToLeft,
+                AutoSize = true,
+                Dock = DockStyle.Right,
+                Padding = new Padding(0, 10, 0, 0)
+            };
             var btnOk = new Button
             {
-                Text            = "Apply Changes",
-                DialogResult    = DialogResult.OK,
-                AutoSize        = true,
-                AutoSizeMode    = AutoSizeMode.GrowAndShrink,
-                Anchor          = AnchorStyles.Bottom | AnchorStyles.Right
+                Text = "Apply Changes",
+                DialogResult = DialogResult.OK,
+                AutoSize = true
             };
             var btnDefault = new Button
             {
-                Text            = "Default Options",
-                AutoSize        = true,
-                AutoSizeMode    = AutoSizeMode.GrowAndShrink,
-                Anchor          = AnchorStyles.Bottom | AnchorStyles.Right
+                Text = "Default Options",
+                AutoSize = true
             };
             btnDefault.Click += (s, e) =>
             {
-                // Reset dialog controls to defaults
                 cbApplyMode.SelectedIndex = 0;
                 rbBoth.Checked = true;
                 cbMergeUnstable.Checked = true;
                 tbGamePath.Text = string.Empty;
             };
-
-            // ── TableLayoutPanel for dynamic layout ──────────────────────────
-            var tlpSettings = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                ColumnCount = 1,
-                RowCount = 6,
-            };
-            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            tlpSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-            tlpSettings.Controls.Add(modePanel,      0, 0);
-            tlpSettings.Controls.Add(blockPanel,     0, 1);
-            tlpSettings.Controls.Add(miscPanel,      0, 2);
-            tlpSettings.Controls.Add(gamePanel,      0, 3);
-            tlpSettings.Controls.Add(lblTipSettings, 0, 4);
-            var buttonPanel = new FlowLayoutPanel
-            {
-                FlowDirection = FlowDirection.RightToLeft,
-                AutoSize      = true,
-                Dock          = DockStyle.Fill
-            };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
-            tlpSettings.Controls.Add(buttonPanel, 0, 5);
 
-            dialog.Controls.Add(tlpSettings);
+
+            tlpMain.Controls.Add(modePanel, 0, 0);
+            tlpMain.Controls.Add(blockPanel, 0, 1);
+            tlpMain.Controls.Add(gamePanel, 0, 2);
+            tlpMain.Controls.Add(lblTipSettings, 0, 3);
+            tlpMain.Controls.Add(buttonPanel, 0, 4);
+
+            dialog.Controls.Add(tlpMain);
             dialog.AcceptButton = btnOk;
 
             if (dialog.ShowDialog(this) == DialogResult.OK)
@@ -1899,6 +1938,95 @@ namespace MakeYourChoice
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
+            }
+        }
+    }
+
+    public class UpdatePrompt : Form
+    {
+        public enum ValidUpdateAction { UpdateNow, AskLater }
+        public ValidUpdateAction SelectedAction { get; private set; }
+        public int DaysToWait { get; private set; }
+
+        private ComboBox _cbAction;
+
+        public UpdatePrompt(string newVersion, string currentVersion)
+        {
+            this.Text = "Update Available";
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = false;
+            this.StartPosition = FormStartPosition.CenterParent;
+            this.ClientSize = new Size(350, 180);
+
+            var lblMessage = new Label
+            {
+                Text = $"A new version is available: {newVersion}.\nWould you like to update?\n\nYour version: {currentVersion}.",
+                Location = new Point(20, 20),
+                Size = new Size(310, 60),
+                TextAlign = ContentAlignment.TopLeft
+            };
+            this.Controls.Add(lblMessage);
+
+            _cbAction = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Location = new Point(20, 90),
+                Size = new Size(310, 25)
+            };
+            _cbAction.Items.Add("Update now");
+            _cbAction.Items.Add("Ask again in 3 days");
+            _cbAction.Items.Add("Ask again in 14 days");
+            _cbAction.Items.Add("Ask again in 21 days");
+            _cbAction.SelectedIndex = 0;
+            this.Controls.Add(_cbAction);
+
+            var btnContinue = new Button
+            {
+                Text = "Continue",
+                DialogResult = DialogResult.OK,
+                Location = new Point(185, 130),
+                Size = new Size(120, 30)
+            };
+            this.Controls.Add(btnContinue);
+
+            var btnNotNow = new Button
+            {
+                Text = "Not now",
+                DialogResult = DialogResult.Cancel,
+                Location = new Point(45, 130),
+                Size = new Size(120, 30)
+            };
+            this.Controls.Add(btnNotNow);
+
+            this.AcceptButton = btnContinue;
+            this.CancelButton = btnNotNow;
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            base.OnFormClosing(e);
+
+            if (this.DialogResult == DialogResult.OK)
+            {
+                switch (_cbAction.SelectedIndex)
+                {
+                    case 0:
+                        SelectedAction = ValidUpdateAction.UpdateNow;
+                        break;
+                    case 1:
+                        SelectedAction = ValidUpdateAction.AskLater;
+                        DaysToWait = 3;
+                        break;
+                    case 2:
+                        SelectedAction = ValidUpdateAction.AskLater;
+                        DaysToWait = 14;
+                        break;
+                    case 3:
+                        SelectedAction = ValidUpdateAction.AskLater;
+                        DaysToWait = 21;
+                        break;
+                }
             }
         }
     }

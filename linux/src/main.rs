@@ -228,6 +228,7 @@ fn build_ui(app: &Application) {
             dialog.run_async(|dialog, _| dialog.close());
 
             settings_lock.last_launched_version = config.current_version.clone();
+            settings_lock.auto_update_check_paused_until = None;
             let _ = settings_lock.save();
         }
     }
@@ -1048,6 +1049,7 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
     let current_version = app_state.config.current_version.clone();
     let runtime = app_state.tokio_runtime.clone();
     let repo_url = app_state.config.repo_url.clone();
+    let settings = app_state.settings.clone();
 
     // Check if developer identity was fetched
     if repo_url.is_none() {
@@ -1073,7 +1075,7 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
                     Some(&window),
                     gtk4::DialogFlags::MODAL,
                     MessageType::Question,
-                    ButtonsType::YesNo,
+                    ButtonsType::None,
                     "Update Available",
                 );
                 dialog.set_secondary_text(Some(&format!(
@@ -1081,9 +1083,40 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
                     new_version, current_version
                 )));
 
+                let combo = ComboBoxText::new();
+                combo.append(Some("now"), "Update now");
+                combo.append(Some("3days"), "Ask again in 3 days");
+                combo.append(Some("14days"), "Ask again in 14 days");
+                combo.append(Some("21days"), "Ask again in 21 days");
+                combo.set_active_id(Some("now"));
+                combo.set_margin_top(10);
+                combo.set_margin_bottom(10);
+                combo.set_margin_start(10);
+                combo.set_margin_end(10);
+
+                dialog.content_area().append(&combo);
+                dialog.add_button("Not now", ResponseType::Close);
+                dialog.add_button("Continue", ResponseType::Ok);
+
                 dialog.run_async(move |dialog, response| {
-                    if response == ResponseType::Yes {
-                        open_url(&releases_url);
+                    if response == ResponseType::Ok {
+                        let active = combo.active_id().map(|s| s.to_string()).unwrap_or_default();
+                        if active == "now" {
+                            open_url(&releases_url);
+                        } else {
+                            let days = match active.as_str() {
+                                "3days" => 3,
+                                "14days" => 14,
+                                "21days" => 21,
+                                _ => 0,
+                            };
+                            if days > 0 {
+                                let mut settings = settings.lock().unwrap();
+                                let date = chrono::Local::now() + chrono::Duration::days(days);
+                                settings.auto_update_check_paused_until = Some(date.to_rfc3339());
+                                let _ = settings.save();
+                            }
+                        }
                     }
                     dialog.close();
                 });
@@ -1107,6 +1140,17 @@ fn check_for_updates_action(app_state: &Rc<AppState>, window: &ApplicationWindow
 }
 
 fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow) {
+    {
+        let settings = app_state.settings.lock().unwrap();
+        if let Some(paused_until) = &settings.auto_update_check_paused_until {
+            if let Ok(date) = chrono::DateTime::parse_from_rfc3339(paused_until) {
+                if chrono::Local::now() < date {
+                    return;
+                }
+            }
+        }
+    }
+
     // Don't check silently if developer identity wasn't fetched
     if app_state.config.repo_url.is_none() {
         show_error_dialog(
@@ -1122,6 +1166,7 @@ fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow
     let current_version = app_state.config.current_version.clone();
     let runtime = app_state.tokio_runtime.clone();
     let releases_url = update_checker.get_releases_url();
+    let settings = app_state.settings.clone();
 
     glib::spawn_future_local(async move {
         let result = runtime
@@ -1135,7 +1180,7 @@ fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow
                 Some(&window),
                 gtk4::DialogFlags::MODAL,
                 MessageType::Question,
-                ButtonsType::YesNo,
+                ButtonsType::None,
                 "Update Available",
             );
             dialog.set_secondary_text(Some(&format!(
@@ -1143,9 +1188,40 @@ fn check_for_updates_silent(app_state: &Rc<AppState>, window: &ApplicationWindow
                 new_version, current_version
             )));
 
+            let combo = ComboBoxText::new();
+            combo.append(Some("now"), "Update now");
+            combo.append(Some("3days"), "Ask again in 3 days");
+            combo.append(Some("14days"), "Ask again in 14 days");
+            combo.append(Some("21days"), "Ask again in 21 days");
+            combo.set_active_id(Some("now"));
+            combo.set_margin_top(10);
+            combo.set_margin_bottom(10);
+            combo.set_margin_start(10);
+            combo.set_margin_end(10);
+
+            dialog.content_area().append(&combo);
+            dialog.add_button("Not now", ResponseType::Close);
+            dialog.add_button("Continue", ResponseType::Ok);
+
             dialog.run_async(move |dialog, response| {
-                if response == ResponseType::Yes {
-                    open_url(&releases_url);
+                if response == ResponseType::Ok {
+                    let active = combo.active_id().map(|s| s.to_string()).unwrap_or_default();
+                    if active == "now" {
+                        open_url(&releases_url);
+                    } else {
+                        let days = match active.as_str() {
+                            "3days" => 3,
+                            "14days" => 14,
+                            "21days" => 21,
+                            _ => 0,
+                        };
+                        if days > 0 {
+                            let mut settings = settings.lock().unwrap();
+                            let date = chrono::Local::now() + chrono::Duration::days(days);
+                            settings.auto_update_check_paused_until = Some(date.to_rfc3339());
+                            let _ = settings.save();
+                        }
+                    }
                 }
                 dialog.close();
             });
@@ -1562,7 +1638,6 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&rb_both);
     settings_box.append(&rb_ping);
     settings_box.append(&rb_service);
-    settings_box.append(&Separator::new(Orientation::Horizontal));
     settings_box.append(&merge_check);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 

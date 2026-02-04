@@ -11,6 +11,7 @@ pub struct UserSettings {
     pub merge_unstable: bool,
     pub last_launched_version: String,
     pub game_path: String,
+    pub auto_update_check_paused_until: Option<String>,
 }
 
 impl Default for UserSettings {
@@ -21,6 +22,7 @@ impl Default for UserSettings {
             merge_unstable: true,
             last_launched_version: String::new(),
             game_path: String::new(),
+            auto_update_check_paused_until: None,
         }
     }
 }
