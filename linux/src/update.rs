@@ -49,6 +49,6 @@ impl UpdateChecker {
     }
 
     pub fn get_releases_url(&self) -> String {
-        format!("https://api.github.com/repos/{}/{}/releases", self.developer, self.repo)
+        format!("https://github.com/{}/{}/releases/latest", self.developer, self.repo)
     }
 }
