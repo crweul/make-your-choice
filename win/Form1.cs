@@ -1951,6 +1951,7 @@ namespace MakeYourChoice
                     }
                 }
 
+                bool darkModeChanged = _darkMode != cbDarkMode.Checked;
                 _applyMode = cbApplyMode.SelectedIndex == 1 ? ApplyMode.UniversalRedirect : ApplyMode.Gatekeep;
                 if (_applyMode == ApplyMode.Gatekeep)
                 {
@@ -1964,6 +1965,12 @@ namespace MakeYourChoice
                 SaveSettings();
                 ApplyTheme();
                 UpdateRegionListViewAppearance();
+                
+                if (darkModeChanged)
+                {
+                    Application.Restart();
+                    Environment.Exit(0);
+                }
             }
         }
 
