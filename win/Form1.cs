@@ -409,9 +409,9 @@ namespace MakeYourChoice
                     {
                         // Unknown region or waiting state handled by default or unknown text
                         if (text.Contains("Waiting"))
-                             dotColor = _darkMode ? Color.SkyBlue : Color.DodgerBlue; // Waiting
+                             dotColor = Color.DodgerBlue; // Waiting
                         else
-                             dotColor = _darkMode ? Color.Gold : Color.DarkGoldenrod; // Unknown region Warning
+                             dotColor = Color.DarkGoldenrod; // Unknown region Warning
                     }
                     else
                     {
@@ -420,11 +420,11 @@ namespace MakeYourChoice
 
                         if (!isBlocked)
                         {
-                             dotColor = _darkMode ? Color.LimeGreen : Color.Green;
+                             dotColor = Color.Green;
                         }
                         else
                         {
-                             dotColor = _darkMode ? Color.IndianRed : Color.Red;
+                             dotColor = Color.Red;
                         }
                     }
                     
@@ -605,10 +605,71 @@ namespace MakeYourChoice
                 View          = View.Details,
                 CheckBoxes    = true,
                 FullRowSelect = true,
-                ShowGroups    = true,
+                ShowGroups    = false,
                 Dock          = DockStyle.Fill
             };
             _lv.ShowItemToolTips = true;
+            _lv.OwnerDraw = true;
+            _lv.DrawColumnHeader += (_, e) =>
+            {
+                using var bg = new SolidBrush(_lv.BackColor);
+                e.Graphics.FillRectangle(bg, e.Bounds);
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    e.Header.Text,
+                    e.Font,
+                    e.Bounds,
+                    _lv.ForeColor,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                );
+            };
+            _lv.DrawItem += (_, e) =>
+            {
+                if (!(e.Item.Tag is string))
+                {
+                    using var bg = new SolidBrush(_lv.BackColor);
+                    e.Graphics.FillRectangle(bg, e.Bounds);
+                }
+                else
+                {
+                    e.DrawDefault = true;
+                }
+            };
+            _lv.DrawSubItem += (_, e) =>
+            {
+                if (e.Item.Tag is string)
+                {
+                    e.DrawDefault = true;
+                    return;
+                }
+
+                if (e.ColumnIndex != 0)
+                    return;
+
+                var font = e.Item.Font ?? _lv.Font;
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    e.SubItem.Text,
+                    font,
+                    e.Bounds,
+                    e.Item.ForeColor,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                );
+            };
+            _lv.ItemCheck += (_, e) =>
+            {
+                if (!(_lv.Items[e.Index].Tag is string))
+                {
+                    e.NewValue = CheckState.Unchecked;
+                }
+            };
+            _lv.ItemSelectionChanged += (_, e) =>
+            {
+                if (!(e.Item.Tag is string) && e.IsSelected)
+                {
+                    e.Item.Selected = false;
+                }
+            };
             // Enable double buffering to reduce flicker
             typeof(ListView).InvokeMember(
                 "DoubleBuffered",
@@ -619,30 +680,45 @@ namespace MakeYourChoice
             );
             _lv.Columns.Add("Server",  220);
             _lv.Columns.Add("Latency", 115);
-            var grpEurope   = new ListViewGroup("Europe",     HorizontalAlignment.Left) { Name = "Europe" };
-            var grpAmericas = new ListViewGroup("The Americas",HorizontalAlignment.Left) { Name = "Americas" };
-            var grpAsia     = new ListViewGroup("Asia (Excl. Cn)",       HorizontalAlignment.Left) { Name = "Asia" };
-            var grpOceania  = new ListViewGroup("Oceania",    HorizontalAlignment.Left) { Name = "Oceania" };
-            var grpChina    = new ListViewGroup("Mainland China",      HorizontalAlignment.Left) { Name = "China" };
-            _lv.Groups.AddRange(new[] { grpEurope, grpAmericas, grpAsia, grpOceania, grpChina });
-            foreach (var kv in _regions)
+            var groupOrder = new (string Key, string Label)[]
             {
-                var regionKey = kv.Key;
-                var displayName = regionKey + (kv.Value.Stable ? string.Empty : " ⚠︎");
-                var item = new ListViewItem(displayName)
+                ("Europe", "Europe"),
+                ("Americas", "The Americas"),
+                ("Asia", "Asia (Excl. Cn)"),
+                ("Oceania", "Oceania")
+            };
+
+            foreach (var (key, label) in groupOrder)
+            {
+                var divider = new ListViewItem(label)
                 {
-                    Tag = regionKey,
-                    Group = _lv.Groups[GetGroupName(regionKey)],
+                    Tag = null,
                     Checked = false,
-                    UseItemStyleForSubItems = false
+                    UseItemStyleForSubItems = false,
+                    ForeColor = Color.DodgerBlue,
+                    Font = new Font(_lv.Font, FontStyle.Bold)
                 };
-                if (!kv.Value.Stable)
+                divider.SubItems.Add(string.Empty);
+                _lv.Items.Add(divider);
+
+                foreach (var kv in _regions.Where(kv => GetGroupName(kv.Key) == key))
                 {
-                    item.ForeColor = Color.Orange;
-                    item.ToolTipText = "Unstable: issues may occur.";
+                    var regionKey = kv.Key;
+                    var displayName = regionKey + (kv.Value.Stable ? string.Empty : " ⚠︎");
+                    var item = new ListViewItem(displayName)
+                    {
+                        Tag = regionKey,
+                        Checked = false,
+                        UseItemStyleForSubItems = false
+                    };
+                    if (!kv.Value.Stable)
+                    {
+                        item.ForeColor = Color.Orange;
+                        item.ToolTipText = "Unstable: issues may occur.";
+                    }
+                    item.SubItems.Add("…");
+                    _lv.Items.Add(item);
                 }
-                item.SubItems.Add("…");
-                _lv.Items.Add(item);
             }
 
             // ── Buttons ─────────────────────────────────────────────────
@@ -1063,10 +1139,11 @@ namespace MakeYourChoice
                 var results = new Dictionary<string, long>();
                 foreach (ListViewItem item in _lv.Items)
                 {
+                    if (!(item.Tag is string regionKey))
+                        continue;
                     long ms;
                     try
                     {
-                        var regionKey = (string)item.Tag;
                         var hosts = _regions[regionKey].Hosts;
                         var reply = await pinger.SendPingAsync(hosts[0], 2000);
                         ms = reply.Status == IPStatus.Success ? reply.RoundtripTime : -1;
@@ -1075,7 +1152,7 @@ namespace MakeYourChoice
                     {
                         ms = -1;
                     }
-                    results[(string)item.Tag] = ms;
+                    results[regionKey] = ms;
                 }
 
                 // Update UI in one batch to avoid flicker (only after handles exist)
@@ -1090,7 +1167,8 @@ namespace MakeYourChoice
                     {
                         foreach (ListViewItem item in _lv.Items)
                         {
-                            var regionKey = (string)item.Tag;
+                            if (!(item.Tag is string regionKey))
+                                continue;
                             var ms = results[regionKey];
                             var sub = item.SubItems[1];
                             if (IsRegionBlockedByHosts(regionKey, blockedHosts))
@@ -1433,7 +1511,11 @@ namespace MakeYourChoice
             // if universal redirect mode, redirect all endpoints to selected region's IPs
             if (_applyMode == ApplyMode.UniversalRedirect)
             {
-                if (_lv.CheckedItems.Count != 1)
+                var selectedRegionItems = _lv.CheckedItems.Cast<ListViewItem>()
+                    .Where(item => item.Tag is string)
+                    .ToList();
+
+                if (selectedRegionItems.Count != 1)
                 {
                     MessageBox.Show(
                         "Please select only one server when using Universal Redirect mode.",
@@ -1443,7 +1525,7 @@ namespace MakeYourChoice
                     return;
                 }
 
-                var regionKey = (string)_lv.CheckedItems[0].Tag;
+                var regionKey = (string)selectedRegionItems[0].Tag;
                 var hosts = _regions[regionKey].Hosts;
                 var serviceHost = hosts[0];
                 var pingHost    = hosts.Length > 1 ? hosts[1] : hosts[0];
@@ -1543,7 +1625,10 @@ namespace MakeYourChoice
             }
 
             // existing gatekeep mode logic
-            if (_lv.CheckedItems.Count == 0)
+            var selectedItems = _lv.CheckedItems.Cast<ListViewItem>()
+                .Where(item => item.Tag is string)
+                .ToList();
+            if (selectedItems.Count == 0)
             {
                 MessageBox.Show(
                     "Please select at least one server to allow.",
@@ -1558,7 +1643,7 @@ namespace MakeYourChoice
                 File.Copy(HostsPath, HostsPath + ".bak", true);
 
                 // Determine if user selected any stable servers
-                var selectedRegions = _lv.CheckedItems.Cast<ListViewItem>()
+                var selectedRegions = selectedItems
                                         .Select(item => (string)item.Tag)
                                         .ToList();
                 bool anyStableSelected = selectedRegions.Any(regionKey => _regions[regionKey].Stable);
@@ -1616,7 +1701,8 @@ namespace MakeYourChoice
 
                 foreach (ListViewItem item in _lv.Items)
                 {
-                    var regionKey = (string)item.Tag;
+                    if (!(item.Tag is string regionKey))
+                        continue;
                     bool allow = allowedSet.Contains(regionKey);
                     var hosts = _regions[regionKey].Hosts;
                     foreach (var h in hosts)
@@ -2217,7 +2303,13 @@ namespace MakeYourChoice
             var defaultColor = _lv.ForeColor;
             foreach (ListViewItem item in _lv.Items)
             {
-                var regionKey = (string)item.Tag;
+                if (!(item.Tag is string regionKey))
+                {
+                    item.ForeColor = Color.DodgerBlue;
+                    item.Font = new Font(_lv.Font, FontStyle.Bold);
+                    item.ToolTipText = string.Empty;
+                    continue;
+                }
                 if (_mergeUnstable && !_regions[regionKey].Stable)
                 {
                     item.Text = regionKey;
