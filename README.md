@@ -23,8 +23,7 @@ Download the latest `.exe` file from the [Releases](https://github.com/laewliet/
 
 ## UAC Popup & SmartScreen Alert
 The application needs to be run with [administrator permissions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/) to ensure the hosts file can be edited. Since I don't want to pay Microsoft a fee for getting this free application signed, you will be met with a prompt to trust the unknown developer.
-
-The SmartScreen Alert only appears on Windows 8 and newer.  
+<img src="https://i.imgur.com/zpMPDzM.png" alt="Main" height="350"> <img src="https://i.imgur.com/bu62CXd.png" alt="Main" height="350">
 
 # Installation: Linux / SteamOS
 > [!NOTE]
@@ -86,8 +85,8 @@ This option is recommended if you have a SteamOS device.
 
 # Screenshots
 ## Windows
-<img src="https://i.imgur.com/wyNJ7HO.png" alt="Main" height="400"> <img src="https://i.imgur.com/J2pI1sy.png" alt="Main" height="400">  
-*Screenshots taken on Windows 10 with a Windows 7 skin.*
+<img src="https://i.imgur.com/36jV4su.png" alt="Main" height="450"> <img src="https://i.imgur.com/45Gesfc.png" alt="Main" height="450">  
+*Screenshots taken on Windows 11 Pro 25H2*
 ## Linux
-<img src="https://i.imgur.com/VlHsxtc.png" alt="Main" height="400"> <img src="https://i.imgur.com/BXZuWkL.png" alt="Main" height="400"> <img src="https://i.imgur.com/xtvswcf.png" alt="Main" height="400">  
+<img src="https://i.imgur.com/VlHsxtc.png" alt="Main" height="450"> <img src="https://i.imgur.com/BXZuWkL.png" alt="Main" height="450"> <img src="https://i.imgur.com/xtvswcf.png" alt="Main" height="450">  
 *Screenshots taken on Arch Linux with the KDE Plasma Desktop Environment.*
