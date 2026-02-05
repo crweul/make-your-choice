@@ -1,4 +1,4 @@
-version: v2.5
+version: v2.6
 notes:
   - MYC now displays the region your current match is connected to.
   - Windows dark mode improvements.
