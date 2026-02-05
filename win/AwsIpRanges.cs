@@ -108,7 +108,10 @@ namespace MakeYourChoice
             await _fetchSemaphore.WaitAsync().ConfigureAwait(false);
             try
             {
-                _cidrs = await FetchRangesAsync().ConfigureAwait(false);
+                if (_cidrs.Count == 0)
+                {
+                    _cidrs = await FetchRangesAsync().ConfigureAwait(false);
+                }
             }
             finally
             {
