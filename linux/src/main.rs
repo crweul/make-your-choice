@@ -570,6 +570,7 @@ fn build_ui(app: &Application) {
     let aws_service = Arc::new(AwsIpService::new());
 
     let (region_tx, region_rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+    let last_seen = Arc::new(Mutex::new(None::<(String, Option<String>)>));
     {
         let connected_label = connected_value.clone();
         let connection_dot = connection_dot.clone();
@@ -578,6 +579,7 @@ fn build_ui(app: &Application) {
         let hosts_manager = hosts_manager.clone();
         let last_update = Rc::new(RefCell::new(None::<DateTime<Local>>));
         let last_update_clone = last_update.clone();
+        let last_seen_for_ui = last_seen.clone();
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let blocked_hosts = hosts_manager.get_blocked_hostnames();
@@ -633,6 +635,9 @@ fn build_ui(app: &Application) {
                     let _ = connection_dot.remove_css_class("blocked");
                     let _ = connection_dot.remove_css_class("unknown");
                     connection_dot.add_css_class("waiting");
+                    if let Ok(mut last) = last_seen_for_ui.lock() {
+                        *last = None;
+                    }
                 }
                 format_update_tooltip(ts)
             } else {
@@ -641,6 +646,9 @@ fn build_ui(app: &Application) {
                 let _ = connection_dot.remove_css_class("blocked");
                 let _ = connection_dot.remove_css_class("unknown");
                 connection_dot.add_css_class("waiting");
+                if let Ok(mut last) = last_seen_for_ui.lock() {
+                    *last = None;
+                }
                 "Most recent connection: —\n\nThis is the region that Dead by Daylight chose\nwhen connecting you to their game.".to_string()
             };
             connected_label.set_tooltip_text(Some(&tooltip));
@@ -653,7 +661,6 @@ fn build_ui(app: &Application) {
     let aws_service_clone = aws_service.clone();
     let runtime_clone = tokio_runtime.clone();
     let region_tx_clone = region_tx.clone();
-    let last_seen = Arc::new(Mutex::new(None::<(String, Option<String>)>));
     let last_seen_clone = last_seen.clone();
 
     let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port| {

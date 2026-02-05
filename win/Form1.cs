@@ -164,6 +164,7 @@ namespace MakeYourChoice
         private AwsIpService _awsService;
         private string _lastDetectedIp;
         private int _lastDetectedPort;
+        private string _lastDetectedRegion;
         private ToolTip _connectionToolTip;
         private Timer _connectionTooltipTimer;
         private DateTime? _lastConnectionUpdate;
@@ -378,10 +379,56 @@ namespace MakeYourChoice
         {
             if (this.Disposing || this.IsDisposed) return;
 
+            void UpdateUi(string regionName)
+            {
+                this.Invoke((System.Windows.Forms.MethodInvoker)delegate
+                {
+                    string text;
+
+                    if (!string.IsNullOrEmpty(regionName))
+                    {
+                        text = $"{regionName}";
+                    }
+                    else
+                    {
+                        text = $"Unknown Region [{ip}]";
+                    }
+
+                    _lblConnectedToValue.Text = text;
+
+                    Color dotColor;
+                    if (string.IsNullOrEmpty(regionName))
+                    {
+                        if (text.Contains("Waiting"))
+                            dotColor = Color.DodgerBlue; // Waiting
+                        else
+                            dotColor = Color.DarkGoldenrod; // Unknown region Warning
+                    }
+                    else
+                    {
+                        var blockedHosts = GetBlockedHostnamesFromHostsSection();
+                        var isBlocked = IsRegionBlockedByHosts(regionName, blockedHosts);
+
+                        if (!isBlocked)
+                        {
+                            dotColor = Color.Green;
+                        }
+                        else
+                        {
+                            dotColor = Color.Red;
+                        }
+                    }
+
+                    _lblConnectionDot.ForeColor = dotColor;
+                    _lblConnectedToValue.ForeColor = _darkMode ? Color.White : Color.Black;
+                    _lastConnectionUpdate = DateTime.Now;
+                    UpdateConnectionTooltip();
+                });
+            }
+
             if (string.Equals(_lastDetectedIp, ip, StringComparison.Ordinal))
             {
-                _lastConnectionUpdate = DateTime.Now;
-                UpdateConnectionTooltip();
+                UpdateUi(_lastDetectedRegion);
                 return;
             }
 
@@ -392,55 +439,8 @@ namespace MakeYourChoice
             {
                 var regionName = await Task.Run(() => _awsService.GetRegionForIp(ip));
 
-                this.Invoke((System.Windows.Forms.MethodInvoker)delegate
-                {
-                    string text;
-                    Color color;
-
-                    if (!string.IsNullOrEmpty(regionName))
-                    {
-                        text = $"{regionName}"; 
-                        color = _darkMode ? Color.LightGreen : Color.DarkGreen;
-                    }
-                    else
-                    {
-                        text = $"Unknown Region [{ip}]";
-                        color = _darkMode ? Color.Gold : Color.DarkGoldenrod;
-                    }
-                    
-                    _lblConnectedToValue.Text = text;
-                    
-                    // Determine dot color
-                    Color dotColor;
-                    if (string.IsNullOrEmpty(regionName))
-                    {
-                        // Unknown region or waiting state handled by default or unknown text
-                        if (text.Contains("Waiting"))
-                             dotColor = Color.DodgerBlue; // Waiting
-                        else
-                             dotColor = Color.DarkGoldenrod; // Unknown region Warning
-                    }
-                    else
-                    {
-                        var blockedHosts = GetBlockedHostnamesFromHostsSection();
-                        var isBlocked = IsRegionBlockedByHosts(regionName, blockedHosts);
-
-                        if (!isBlocked)
-                        {
-                             dotColor = Color.Green;
-                        }
-                        else
-                        {
-                             dotColor = Color.Red;
-                        }
-                    }
-                    
-                    _lblConnectionDot.ForeColor = dotColor;
-
-                    _lblConnectedToValue.ForeColor = _darkMode ? Color.White : Color.Black; // Reset text color to standard
-                    _lastConnectionUpdate = DateTime.Now;
-                    UpdateConnectionTooltip();
-                });
+                _lastDetectedRegion = regionName;
+                UpdateUi(regionName);
             }
             catch { /* Ignore if UI is gone */ }
         }
