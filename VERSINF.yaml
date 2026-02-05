@@ -2,3 +2,4 @@ version: v2.5
 notes:
   - MYC now displays the region your current match is connected to.
   - Windows dark mode improvements.
+  - v2.6 Fixed a bug where the AWS prefix json would be fetched on every incoming packet.
