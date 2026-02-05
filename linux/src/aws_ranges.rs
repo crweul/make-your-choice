@@ -28,6 +28,12 @@ impl AwsIpService {
 
     async fn refresh(&self) -> Result<(), Box<dyn std::error::Error>> {
         let _guard = self.fetch_lock.lock().await;
+        {
+            let cidrs = self.cidrs.lock().unwrap();
+            if !cidrs.is_empty() {
+                return Ok(());
+            }
+        }
         let url = "https://ip-ranges.amazonaws.com/ip-ranges.json";
         let client = reqwest::Client::new();
         let resp = client

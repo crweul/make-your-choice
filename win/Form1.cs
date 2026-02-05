@@ -378,6 +378,13 @@ namespace MakeYourChoice
         {
             if (this.Disposing || this.IsDisposed) return;
 
+            if (string.Equals(_lastDetectedIp, ip, StringComparison.Ordinal))
+            {
+                _lastConnectionUpdate = DateTime.Now;
+                UpdateConnectionTooltip();
+                return;
+            }
+
             _lastDetectedIp = ip;
             _lastDetectedPort = port;
             

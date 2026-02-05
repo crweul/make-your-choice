@@ -653,15 +653,29 @@ fn build_ui(app: &Application) {
     let aws_service_clone = aws_service.clone();
     let runtime_clone = tokio_runtime.clone();
     let region_tx_clone = region_tx.clone();
+    let last_seen = Arc::new(Mutex::new(None::<(String, Option<String>)>));
+    let last_seen_clone = last_seen.clone();
 
     let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port| {
+        if let Ok(last) = last_seen_clone.lock() {
+            if let Some((last_ip, last_region)) = &*last {
+                if last_ip == &remote_ip {
+                    let _ = region_tx_clone.send((remote_ip, last_region.clone()));
+                    return;
+                }
+            }
+        }
         let aws = aws_service_clone.clone();
         let runtime = runtime_clone.clone();
         let ip_string = remote_ip.clone();
         let region_tx = region_tx_clone.clone();
+        let last_seen_update = last_seen_clone.clone();
 
         runtime.spawn(async move {
             let region_name_opt = aws.get_region(&ip_string).await;
+            if let Ok(mut last) = last_seen_update.lock() {
+                *last = Some((ip_string.clone(), region_name_opt.clone()));
+            }
             let _ = region_tx.send((ip_string, region_name_opt));
         });
     }));
