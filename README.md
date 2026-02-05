@@ -22,7 +22,7 @@ Download the latest `.exe` file from the [Releases](https://github.com/laewliet/
 - Windows 11
 
 ## UAC Popup & SmartScreen Alert
-The application needs to be run with [administrator permissions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/) to ensure the hosts file can be edited. Since I don't want to pay Microsoft a fee for getting this free application signed, you will be met with a prompt to trust the unknown developer.
+The application needs to be run with [administrator permissions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/) to ensure the hosts file can be edited. Since I don't want to pay Microsoft a fee for getting this free application signed, you will be met with a prompt to trust the unknown developer.  
 <img src="https://i.imgur.com/zpMPDzM.png" alt="Main" height="350"> <img src="https://i.imgur.com/bu62CXd.png" alt="Main" height="350">
 
 # Installation: Linux / SteamOS
