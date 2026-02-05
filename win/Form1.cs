@@ -162,6 +162,11 @@ namespace MakeYourChoice
         private Label _lblConnectionDot; 
         private TrafficSniffer _sniffer;
         private AwsIpService _awsService;
+        private string _lastDetectedIp;
+        private int _lastDetectedPort;
+        private ToolTip _connectionToolTip;
+        private Timer _connectionTooltipTimer;
+        private DateTime? _lastConnectionUpdate;
 
         // Tracks the last launched version for update message display
         private string _lastLaunchedVersion;
@@ -310,9 +315,12 @@ namespace MakeYourChoice
         {
             InitializeComponent();
 
+            _connectionTooltipTimer = new Timer { Interval = 1000 };
+            _connectionTooltipTimer.Tick += (_, __) => UpdateConnectionTooltip();
+            _connectionTooltipTimer.Start();
+
             // Initialize AWS Service and Sniffer
             _awsService = new AwsIpService();
-            _ = _awsService.InitializeAsync(); // Start fetching in background
 
             _sniffer = new TrafficSniffer();
             _sniffer.TrafficDetected += OnTrafficDetected;
@@ -366,22 +374,25 @@ namespace MakeYourChoice
             base.OnFormClosing(e);
         }
 
-        private void OnTrafficDetected(string ip, int port)
+        private async void OnTrafficDetected(string ip, int port)
         {
             if (this.Disposing || this.IsDisposed) return;
+
+            _lastDetectedIp = ip;
+            _lastDetectedPort = port;
             
             try 
             {
+                var regionName = await Task.Run(() => _awsService.GetRegionForIp(ip));
+
                 this.Invoke((System.Windows.Forms.MethodInvoker)delegate
                 {
-                    var regionCode = _awsService.GetRegionForIp(ip);
                     string text;
                     Color color;
 
-                    if (!string.IsNullOrEmpty(regionCode))
+                    if (!string.IsNullOrEmpty(regionName))
                     {
-                        var friendlyName = AwsIpService.GetPrettyRegionName(regionCode);
-                        text = $"{friendlyName}"; 
+                        text = $"{regionName}"; 
                         color = _darkMode ? Color.LightGreen : Color.DarkGreen;
                     }
                     else
@@ -394,7 +405,7 @@ namespace MakeYourChoice
                     
                     // Determine dot color
                     Color dotColor;
-                    if (string.IsNullOrEmpty(regionCode))
+                    if (string.IsNullOrEmpty(regionName))
                     {
                         // Unknown region or waiting state handled by default or unknown text
                         if (text.Contains("Waiting"))
@@ -404,24 +415,10 @@ namespace MakeYourChoice
                     }
                     else
                     {
-                        // Check if this region is allowed (checked in list view)
-                        // "friendlyName" is just the display name, we need to match the key.
-                        // The GetRegionForIp returns the region code (e.g., eu-west-2).
-                        
-                        var key = AwsIpService.GetPrettyRegionName(regionCode);
-                        
-                        // Check if this key exists in our ListView and is checked.
-                        bool isAllowed = false;
-                        foreach (ListViewItem item in _lv.Items)
-                        {
-                            if (item.Tag is string itemKey && itemKey == key)
-                            {
-                                isAllowed = item.Checked;
-                                break;
-                            }
-                        }
-                        
-                        if (isAllowed)
+                        var blockedHosts = GetBlockedHostnamesFromHostsSection();
+                        var isBlocked = IsRegionBlockedByHosts(regionName, blockedHosts);
+
+                        if (!isBlocked)
                         {
                              dotColor = _darkMode ? Color.LimeGreen : Color.Green;
                         }
@@ -434,6 +431,8 @@ namespace MakeYourChoice
                     _lblConnectionDot.ForeColor = dotColor;
 
                     _lblConnectedToValue.ForeColor = _darkMode ? Color.White : Color.Black; // Reset text color to standard
+                    _lastConnectionUpdate = DateTime.Now;
+                    UpdateConnectionTooltip();
                 });
             }
             catch { /* Ignore if UI is gone */ }
@@ -582,6 +581,9 @@ namespace MakeYourChoice
                 TextAlign   = ContentAlignment.MiddleLeft
             };
 
+            _connectionToolTip = new ToolTip();
+            UpdateConnectionTooltip();
+
             flpConnection.Controls.Add(_lblConnectionDot);
             flpConnection.Controls.Add(lblConnectedToTitle);
             flpConnection.Controls.Add(_lblConnectedToValue);
@@ -678,6 +680,42 @@ namespace MakeYourChoice
             tlp.Controls.Add(_buttonPanel, 0, 4);
 
             Controls.Add(tlp);
+        }
+
+        private void UpdateConnectionTooltip()
+        {
+            if (_connectionToolTip == null || _lblConnectedToValue == null) return;
+
+            string header;
+            if (_lastConnectionUpdate.HasValue)
+            {
+                var seconds = (int)Math.Max(0, (DateTime.Now - _lastConnectionUpdate.Value).TotalSeconds);
+                var time = FormatSmallCapsTime(_lastConnectionUpdate.Value);
+                header = $"Most recent connection: {seconds}s ago, at {time}";
+
+                if (seconds >= 5)
+                {
+                    _lblConnectedToValue.Text = "Waiting for match…";
+                    _lblConnectionDot.ForeColor = _darkMode ? Color.SkyBlue : Color.DodgerBlue;
+                }
+            }
+            else
+            {
+                header = "Most recent connection: —";
+            }
+
+            var tooltip =
+                header + "\n\n" +
+                "This is the region that Dead by Daylight chose\n" +
+                "when connecting you to their game.";
+
+            _connectionToolTip.SetToolTip(_lblConnectedToValue, tooltip);
+        }
+
+        private static string FormatSmallCapsTime(DateTime dt)
+        {
+            var time = dt.ToString("h:mmtt");
+            return time.Replace("AM", "ᴀᴍ").Replace("PM", "ᴘᴍ");
         }
 
         private void HandleCustomSplashArt()
@@ -1046,6 +1084,7 @@ namespace MakeYourChoice
 
                 void UpdateLatencyUI()
                 {
+                    var blockedHosts = GetBlockedHostnamesFromHostsSection();
                     _lv.BeginUpdate();
                     try
                     {
@@ -1054,8 +1093,16 @@ namespace MakeYourChoice
                             var regionKey = (string)item.Tag;
                             var ms = results[regionKey];
                             var sub = item.SubItems[1];
-                            sub.Text      = ms >= 0 ? $"{ms} ms" : "disconnected";
-                            sub.ForeColor = GetColorForLatency(ms);
+                            if (IsRegionBlockedByHosts(regionKey, blockedHosts))
+                            {
+                                sub.Text = "disconnected";
+                                sub.ForeColor = Color.Gray;
+                            }
+                            else
+                            {
+                                sub.Text = ms >= 0 ? $"{ms} ms" : "disconnected";
+                                sub.ForeColor = GetColorForLatency(ms);
+                            }
                             sub.Font      = new Font(sub.Font, FontStyle.Italic);
                         }
                     }
@@ -1110,6 +1157,60 @@ namespace MakeYourChoice
                 }
             }
             return hostnames.ToList();
+        }
+
+        private HashSet<string> GetBlockedHostnamesFromHostsSection()
+        {
+            var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var hostsContent = File.ReadAllText(HostsPath);
+                var normalized = hostsContent.Replace("\r\n", "\n").Replace("\r", "\n");
+                var firstMarker = normalized.IndexOf(SectionMarker, StringComparison.Ordinal);
+                if (firstMarker < 0) return blocked;
+                var secondMarker = normalized.IndexOf(SectionMarker, firstMarker + SectionMarker.Length, StringComparison.Ordinal);
+                if (secondMarker < 0) return blocked;
+
+                var inner = normalized.Substring(firstMarker + SectionMarker.Length, secondMarker - (firstMarker + SectionMarker.Length));
+                foreach (var rawLine in inner.Split('\n'))
+                {
+                    var line = rawLine.Trim();
+                    if (string.IsNullOrEmpty(line) || line.StartsWith("#", StringComparison.Ordinal))
+                        continue;
+
+                    var parts = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 2) continue;
+                    if (!string.Equals(parts[0], "0.0.0.0", StringComparison.Ordinal)) continue;
+
+                    for (int i = 1; i < parts.Length; i++)
+                    {
+                        blocked.Add(parts[i].ToLowerInvariant());
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore read errors
+            }
+
+            return blocked;
+        }
+
+        private bool IsRegionBlockedByHosts(string regionKey, HashSet<string> blockedHosts)
+        {
+            if (blockedHosts.Count == 0) return false;
+
+            if (_regions.TryGetValue(regionKey, out var info))
+            {
+                return info.Hosts.Any(h => blockedHosts.Contains(h.ToLowerInvariant()));
+            }
+
+            if (_blockedRegions.TryGetValue(regionKey, out var blockedInfo))
+            {
+                return blockedInfo.Hosts.Any(h => blockedHosts.Contains(h.ToLowerInvariant()));
+            }
+
+            return false;
         }
 
         private List<string> DetectConflictingEntries()
