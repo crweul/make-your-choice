@@ -6,8 +6,24 @@
         <UseWindowsForms>true</UseWindowsForms>
         <OutputType>WinExe</OutputType>
         <EnableWindowsTargeting>true</EnableWindowsTargeting>
+        <Platforms>x64</Platforms>
+        <PlatformTarget>x64</PlatformTarget>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
 
-        <!-- core single-file settings -->
+        <!-- auto-elevation and icon  -->
+        <ApplicationManifest>app.manifest</ApplicationManifest>
+        <ApplicationIcon>icon.ico</ApplicationIcon>
+
+        <!-- shared optimization settings -->
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+        <EventSourceSupport>false</EventSourceSupport>
+        <DebuggerSupport Condition="'$(Configuration)' == 'Release'">false</DebuggerSupport>
+        <DebuggerSupport Condition="'$(Configuration)' == 'Debug'">true</DebuggerSupport>
+    </PropertyGroup>
+
+    <!-- core single-file settings (Release only) -->
+    <PropertyGroup Condition="'$(Configuration)' == 'Release'">
         <PublishSingleFile>true</PublishSingleFile>
         <SelfContained>true</SelfContained>
         <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -17,18 +33,10 @@
         <!-- bundle _all_ content for self-extract at runtime -->
         <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
 
-        <!-- auto-elevation and icon  -->
-        <ApplicationManifest>app.manifest</ApplicationManifest>
-        <ApplicationIcon>icon.ico</ApplicationIcon>
-
         <!-- size optimization -->
         <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
         <PublishTrimmed>true</PublishTrimmed>
         <TrimMode>partial</TrimMode>
-        <InvariantGlobalization>true</InvariantGlobalization>
-        <DebuggerSupport>false</DebuggerSupport>
-        <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
-        <EventSourceSupport>false</EventSourceSupport>
         <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
     </PropertyGroup>
 
