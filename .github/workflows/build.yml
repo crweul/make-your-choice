@@ -31,7 +31,7 @@ jobs:
       - name: Read version
         run: |
           VERSION=$(sed -n 's/^version:[[:space:]]*//p' VERSINF.yml | head -n1)
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Build (Linux)
         working-directory: linux
@@ -40,12 +40,12 @@ jobs:
       - name: Package (Linux)
         run: |
           mkdir -p dist
-          cp linux/target/release/make-your-choice "dist/MakeYourChoice-${VERSION}-Linux"
+          cp linux/target/release/make-your-choice "dist/MakeYourChoice-${RELEASE_VERSION}-Linux"
 
       - name: Upload to Release (Linux)
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/MakeYourChoice-${{ env.VERSION }}-Linux
+          files: dist/MakeYourChoice-${{ env.RELEASE_VERSION }}-Linux
 
   build-windows:
     runs-on: windows-latest
@@ -68,7 +68,7 @@ jobs:
           $versionLine = Get-Content VERSINF.yml | Select-String '^version:' | Select-Object -First 1
           if (-not $versionLine) { throw 'version not found in VERSINF.yml' }
           $version = $versionLine.Line -replace '^version:\s*', ''
-          Add-Content $env:GITHUB_ENV "VERSION=$version"
+          Add-Content $env:GITHUB_ENV "RELEASE_VERSION=$version"
 
       - name: Build (Windows)
         working-directory: win
@@ -79,10 +79,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $dest = "dist/MakeYourChoice-$env:VERSION-Win.exe"
+          $dest = "dist/MakeYourChoice-$env:RELEASE_VERSION-Win.exe"
           Copy-Item -Path win/bin/Release/net10.0-windows/win-x64/publish/MakeYourChoice.exe -Destination $dest
 
       - name: Upload to Release (Windows)
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/MakeYourChoice-${{ env.VERSION }}-Win.exe
+          files: dist/MakeYourChoice-${{ env.RELEASE_VERSION }}-Win.exe
