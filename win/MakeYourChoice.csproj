@@ -25,7 +25,7 @@
         <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
         <PublishTrimmed>true</PublishTrimmed>
         <TrimMode>partial</TrimMode>
-        <InvariantGlobalization>true</InvariantGlobalization>
+        <InvariantGlobalization>false</InvariantGlobalization>
         <DebuggerSupport>false</DebuggerSupport>
         <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
         <EventSourceSupport>false</EventSourceSupport>
@@ -40,13 +40,19 @@
             <Link>star.svg</Link>
             <CopyToOutputDirectory>Always</CopyToOutputDirectory>
         </Content>
-        <EmbeddedResource Include="..\VERSINF.yaml">
-            <Link>VERSINF.yaml</Link>
+        <Content Include="..\shared\kofi.svg">
+            <Link>kofi.svg</Link>
+            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+        <EmbeddedResource Include="..\VERSINF.yml">
+            <Link>VERSINF.yml</Link>
         </EmbeddedResource>
     </ItemGroup>
-
     <ItemGroup>
         <PackageReference Include="YamlDotNet" Version="16.2.1" />
         <PackageReference Include="Svg" Version="3.4.7" />
+    </ItemGroup>
+    <ItemGroup>
+        <TrimmerRootAssembly Include="System.Diagnostics.Process" />
     </ItemGroup>
 </Project>
