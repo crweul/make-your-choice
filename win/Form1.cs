@@ -162,6 +162,7 @@ namespace MakeYourChoice
         private Label _lblConnectedToValue;
         private Label _lblConnectionDot; 
         private TrafficSniffer _sniffer;
+        private bool _snifferStarted;
         private AwsIpService _awsService;
         private string _lastDetectedIp;
         private int _lastDetectedPort;
@@ -459,11 +460,11 @@ namespace MakeYourChoice
 
             _sniffer = new TrafficSniffer();
             _sniffer.TrafficDetected += OnTrafficDetected;
-            _sniffer.Start();
 
             this.Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"));
             this.Shown += async (_, __) =>
             {
+                StartSniffer();
                 StartPingTimer();
                 await FetchGitIdentityAsync();
                 _ = CheckForUpdatesAsync(true);
@@ -479,6 +480,15 @@ namespace MakeYourChoice
                 SaveSettings();
             }
             UpdateRegionListViewAppearance();
+        }
+
+        private void StartSniffer()
+        {
+            if (_snifferStarted || _sniffer == null)
+                return;
+
+            _snifferStarted = true;
+            _sniffer.Start();
         }
 
         private async Task FetchGitIdentityAsync()
@@ -505,7 +515,11 @@ namespace MakeYourChoice
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            _sniffer?.Stop();
+            if (_sniffer != null)
+            {
+                _sniffer.TrafficDetected -= OnTrafficDetected;
+                _sniffer.Stop();
+            }
             base.OnFormClosing(e);
         }
 
@@ -513,51 +527,74 @@ namespace MakeYourChoice
         {
             if (this.Disposing || this.IsDisposed) return;
 
+            void ApplyUi(string regionName)
+            {
+                if (this.Disposing || this.IsDisposed) return;
+                if (_lblConnectedToValue == null || _lblConnectionDot == null) return;
+                if (!this.IsHandleCreated || !_lblConnectedToValue.IsHandleCreated || !_lblConnectionDot.IsHandleCreated) return;
+
+                string text;
+
+                if (!string.IsNullOrEmpty(regionName))
+                {
+                    text = $"{regionName}";
+                }
+                else
+                {
+                    text = $"Unknown Region [{ip}]";
+                }
+
+                _lblConnectedToValue.Text = text;
+
+                Color dotColor;
+                if (string.IsNullOrEmpty(regionName))
+                {
+                    if (text.Contains("Waiting"))
+                        dotColor = Color.LightSlateGray; // Waiting
+                    else
+                        dotColor = Color.Orange; // Unknown region Warning
+                }
+                else
+                {
+                    var blockedHosts = GetBlockedHostnamesFromHostsSection();
+                    var isBlocked = IsRegionBlockedByHosts(regionName, blockedHosts);
+
+                    if (!isBlocked)
+                    {
+                        dotColor = Color.Green;
+                    }
+                    else
+                    {
+                        dotColor = Color.Red;
+                    }
+                }
+
+                _lblConnectionDot.ForeColor = dotColor;
+                _lblConnectedToValue.ForeColor = _darkMode ? Color.White : Color.Black;
+                _lastConnectionUpdate = DateTime.Now;
+                UpdateConnectionTooltip();
+            }
+
             void UpdateUi(string regionName)
             {
-                this.Invoke((System.Windows.Forms.MethodInvoker)delegate
+                if (this.Disposing || this.IsDisposed) return;
+                if (!this.IsHandleCreated) return;
+
+                if (this.InvokeRequired)
                 {
-                    string text;
-
-                    if (!string.IsNullOrEmpty(regionName))
+                    try
                     {
-                        text = $"{regionName}";
+                        this.BeginInvoke((Action)(() => ApplyUi(regionName)));
                     }
-                    else
+                    catch
                     {
-                        text = $"Unknown Region [{ip}]";
+                        // Ignore if handle is gone mid-invoke
                     }
-
-                    _lblConnectedToValue.Text = text;
-
-                    Color dotColor;
-                    if (string.IsNullOrEmpty(regionName))
-                    {
-                        if (text.Contains("Waiting"))
-                            dotColor = Color.LightSlateGray; // Waiting
-                        else
-                            dotColor = Color.Orange; // Unknown region Warning
-                    }
-                    else
-                    {
-                        var blockedHosts = GetBlockedHostnamesFromHostsSection();
-                        var isBlocked = IsRegionBlockedByHosts(regionName, blockedHosts);
-
-                        if (!isBlocked)
-                        {
-                            dotColor = Color.Green;
-                        }
-                        else
-                        {
-                            dotColor = Color.Red;
-                        }
-                    }
-
-                    _lblConnectionDot.ForeColor = dotColor;
-                    _lblConnectedToValue.ForeColor = _darkMode ? Color.White : Color.Black;
-                    _lastConnectionUpdate = DateTime.Now;
-                    UpdateConnectionTooltip();
-                });
+                }
+                else
+                {
+                    ApplyUi(regionName);
+                }
             }
 
             if (string.Equals(_lastDetectedIp, ip, StringComparison.Ordinal))
@@ -571,6 +608,7 @@ namespace MakeYourChoice
             
             try 
             {
+                if (_awsService == null) return;
                 var regionName = await Task.Run(() => _awsService.GetRegionForIp(ip));
 
                 _lastDetectedRegion = regionName;
