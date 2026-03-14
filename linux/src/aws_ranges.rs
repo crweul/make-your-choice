@@ -26,14 +26,8 @@ impl AwsIpService {
         }
     }
 
-    async fn refresh(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn refresh_now(&self) -> Result<(), Box<dyn std::error::Error>> {
         let _guard = self.fetch_lock.lock().await;
-        {
-            let cidrs = self.cidrs.lock().unwrap();
-            if !cidrs.is_empty() {
-                return Ok(());
-            }
-        }
         let url = "https://ip-ranges.amazonaws.com/ip-ranges.json";
         let client = reqwest::Client::new();
         let resp = client
@@ -70,8 +64,25 @@ impl AwsIpService {
         Ok(())
     }
 
+    async fn ensure_loaded(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let is_empty = {
+            let cidrs = self.cidrs.lock().unwrap();
+            cidrs.is_empty()
+        };
+
+        if is_empty {
+            self.refresh_now().await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn refresh_periodic(&self) {
+        let _ = self.refresh_now().await;
+    }
+
     pub async fn get_region(&self, ip_str: &str) -> Option<String> {
-        self.refresh().await.ok()?;
+        self.ensure_loaded().await.ok()?;
 
         let ip: IpAddr = ip_str.parse().ok()?;
         let ip_v4 = match ip {

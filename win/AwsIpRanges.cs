@@ -76,8 +76,8 @@ namespace MakeYourChoice
 
         public string GetRegionForIp(string ipAddress)
         {
-            // Always fetch fresh ranges per request (call from background thread).
-            RefreshRangesAsync().GetAwaiter().GetResult();
+            // Ensure ranges are available for lookup without blocking on network every call.
+            EnsureRangesLoadedAsync().GetAwaiter().GetResult();
 
             if (_cidrs.Count == 0) return null;
 
@@ -108,15 +108,27 @@ namespace MakeYourChoice
             await _fetchSemaphore.WaitAsync().ConfigureAwait(false);
             try
             {
-                if (_cidrs.Count == 0)
-                {
-                    _cidrs = await FetchRangesAsync().ConfigureAwait(false);
-                }
+                _cidrs = await FetchRangesAsync().ConfigureAwait(false);
             }
             finally
             {
                 _fetchSemaphore.Release();
             }
+        }
+
+        private async Task EnsureRangesLoadedAsync()
+        {
+            if (_cidrs.Count != 0)
+            {
+                return;
+            }
+
+            await RefreshRangesAsync().ConfigureAwait(false);
+        }
+
+        public Task RefreshRangesPeriodicallyAsync()
+        {
+            return RefreshRangesAsync();
         }
 
         private bool TryParseIpv4Cidr(string cidr, out uint network, out uint mask, out int prefixLength)

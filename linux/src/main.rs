@@ -20,8 +20,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Local};
 use tokio::runtime::Runtime;
+use tokio::time::{self, Duration};
 
 use hosts::HostsManager;
 use region::*;
@@ -82,8 +84,27 @@ struct AppState {
     tokio_runtime: Arc<Runtime>,
     sniffer: Arc<TrafficSniffer>,
     aws_service: Arc<AwsIpService>,
+    aws_fetch_interval_minutes: Arc<AtomicU64>,
     connected_to_label: Label,
     connection_dot: Label,
+}
+
+const AWS_FETCH_INTERVAL_OPTIONS_MINUTES: [u32; 6] = [2, 5, 10, 20, 45, 60];
+
+fn normalize_aws_fetch_interval_minutes(minutes: u32) -> u32 {
+    for allowed in AWS_FETCH_INTERVAL_OPTIONS_MINUTES {
+        if minutes == allowed {
+            return allowed;
+        }
+    }
+    10
+}
+
+fn aws_fetch_interval_index(minutes: u32) -> usize {
+    AWS_FETCH_INTERVAL_OPTIONS_MINUTES
+        .iter()
+        .position(|&m| m == normalize_aws_fetch_interval_minutes(minutes))
+        .unwrap_or(2)
 }
 
 fn get_color_for_latency(ms: i64) -> &'static str {
@@ -576,8 +597,25 @@ fn build_ui(app: &Application) {
     button_box.append(&btn_revert);
     button_box.append(&btn_apply);
 
+    let aws_fetch_interval_minutes = Arc::new(AtomicU64::new(
+        normalize_aws_fetch_interval_minutes(settings.lock().unwrap().aws_fetch_interval_minutes)
+            as u64,
+    ));
+
     // Initialize AWS service
     let aws_service = Arc::new(AwsIpService::new());
+    {
+        let aws_refresh_service = aws_service.clone();
+        let refresh_minutes = aws_fetch_interval_minutes.clone();
+        tokio_runtime.spawn(async move {
+            aws_refresh_service.refresh_periodic().await;
+            loop {
+                let minutes = refresh_minutes.load(Ordering::Relaxed).max(1);
+                time::sleep(Duration::from_secs(minutes * 60)).await;
+                aws_refresh_service.refresh_periodic().await;
+            }
+        });
+    }
 
     let (region_tx, region_rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
     let last_seen = Arc::new(Mutex::new(None::<(String, Option<String>)>));
@@ -725,6 +763,7 @@ fn build_ui(app: &Application) {
         tokio_runtime,
         sniffer,
         aws_service,
+        aws_fetch_interval_minutes,
         connected_to_label: connected_value,
         connection_dot: connection_dot, 
     });
@@ -1933,6 +1972,34 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     let merge_check = CheckButton::with_label("Merge unstable servers (recommended)");
     merge_check.set_active(settings.merge_unstable);
 
+    // Connectivity
+    let connectivity_label = Label::new(Some("Connectivity:"));
+    connectivity_label.set_halign(gtk4::Align::Start);
+
+    let fetch_label = Label::new(Some("Fetch AWS ranges every"));
+    fetch_label.set_halign(gtk4::Align::Start);
+
+    let fetch_scale = gtk4::Scale::with_range(Orientation::Horizontal, 0.0, 5.0, 1.0);
+    fetch_scale.set_digits(0);
+    fetch_scale.set_draw_value(false);
+    fetch_scale.set_hexpand(true);
+
+    let current_interval = normalize_aws_fetch_interval_minutes(settings.aws_fetch_interval_minutes);
+    fetch_scale.set_value(aws_fetch_interval_index(current_interval) as f64);
+
+    let fetch_value_label = Label::new(Some(&format!("{} minutes", current_interval)));
+    fetch_value_label.set_halign(gtk4::Align::End);
+
+    {
+        let fetch_value_label = fetch_value_label.clone();
+        fetch_scale.connect_value_changed(move |scale| {
+            let idx = scale.value().round() as usize;
+            let idx = idx.min(AWS_FETCH_INTERVAL_OPTIONS_MINUTES.len() - 1);
+            let minutes = AWS_FETCH_INTERVAL_OPTIONS_MINUTES[idx];
+            fetch_value_label.set_text(&format!("{} minutes", minutes));
+        });
+    }
+
     settings_box.append(&mode_label);
     settings_box.append(&mode_combo);
     settings_box.append(&mode_notice);
@@ -1942,6 +2009,15 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&rb_ping);
     settings_box.append(&rb_service);
     settings_box.append(&merge_check);
+    settings_box.append(&Separator::new(Orientation::Horizontal));
+
+    let connectivity_row = GtkBox::new(Orientation::Horizontal, 8);
+    connectivity_row.append(&fetch_scale);
+    connectivity_row.append(&fetch_value_label);
+
+    settings_box.append(&connectivity_label);
+    settings_box.append(&fetch_label);
+    settings_box.append(&connectivity_row);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2035,6 +2111,13 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
 
             settings.merge_unstable = merge_check.is_active();
             settings.game_path = game_path_text;
+            let fetch_idx = fetch_scale.value().round() as usize;
+            let fetch_idx = fetch_idx.min(AWS_FETCH_INTERVAL_OPTIONS_MINUTES.len() - 1);
+            let fetch_minutes = AWS_FETCH_INTERVAL_OPTIONS_MINUTES[fetch_idx];
+            settings.aws_fetch_interval_minutes = fetch_minutes;
+            app_state_clone
+                .aws_fetch_interval_minutes
+                .store(fetch_minutes as u64, Ordering::Relaxed);
 
             let _ = settings.save();
 
@@ -2055,6 +2138,10 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.block_mode = BlockMode::Both;
             settings.merge_unstable = true;
             settings.game_path.clear();
+            settings.aws_fetch_interval_minutes = 10;
+            app_state_clone
+                .aws_fetch_interval_minutes
+                .store(10, Ordering::Relaxed);
 
             let _ = settings.save();
 
@@ -2063,6 +2150,8 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             mode_combo.set_active(Some(0));
             rb_both.set_active(true);
             merge_check.set_active(true);
+            fetch_scale.set_value(aws_fetch_interval_index(10) as f64);
+            fetch_value_label.set_text("10 minutes");
 
             // Refresh the warning symbols in the list view
             refresh_warning_symbols(

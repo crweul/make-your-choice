@@ -164,6 +164,9 @@ namespace MakeYourChoice
         private TrafficSniffer _sniffer;
         private bool _snifferStarted;
         private AwsIpService _awsService;
+        private System.Threading.CancellationTokenSource _awsRefreshCts;
+        private Task _awsRefreshTask;
+        private int _awsFetchIntervalMinutes = 10;
         private string _lastDetectedIp;
         private int _lastDetectedPort;
         private string _lastDetectedRegion;
@@ -197,6 +200,26 @@ namespace MakeYourChoice
             public string GamePath { get; set; }
             public string AutoUpdateCheckPausedUntil { get; set; }
             public bool DarkMode { get; set; }
+            public int AwsFetchIntervalMinutes { get; set; } = 10;
+        }
+
+        private static readonly int[] AwsFetchIntervalOptionsMinutes = { 2, 5, 10, 20, 45, 60 };
+
+        private static int NormalizeAwsFetchIntervalMinutes(int minutes)
+        {
+            return AwsFetchIntervalOptionsMinutes.Contains(minutes) ? minutes : 10;
+        }
+
+        private static int AwsFetchIntervalIndex(int minutes)
+        {
+            var normalized = NormalizeAwsFetchIntervalMinutes(minutes);
+            var index = Array.IndexOf(AwsFetchIntervalOptionsMinutes, normalized);
+            return index >= 0 ? index : 2;
+        }
+
+        private int GetAwsFetchIntervalMinutes()
+        {
+            return NormalizeAwsFetchIntervalMinutes(_awsFetchIntervalMinutes);
         }
 
         private void LoadSettings()
@@ -220,6 +243,7 @@ namespace MakeYourChoice
                     _gamePath = settings.GamePath;
                     _autoUpdateCheckPausedUntil = settings.AutoUpdateCheckPausedUntil;
                     _darkMode = settings.DarkMode;
+                    _awsFetchIntervalMinutes = NormalizeAwsFetchIntervalMinutes(settings.AwsFetchIntervalMinutes);
                 }
             }
             catch
@@ -247,6 +271,7 @@ namespace MakeYourChoice
                     GamePath = _gamePath,
                     AutoUpdateCheckPausedUntil = _autoUpdateCheckPausedUntil,
                     DarkMode = _darkMode,
+                    AwsFetchIntervalMinutes = GetAwsFetchIntervalMinutes(),
                 };
                 var serializer = new SerializerBuilder().Build();
                 var yaml = serializer.Serialize(settings);
@@ -457,6 +482,7 @@ namespace MakeYourChoice
 
             // Initialize AWS Service and Sniffer
             _awsService = new AwsIpService();
+            StartAwsRangesRefreshLoop();
 
             _sniffer = new TrafficSniffer();
             _sniffer.TrafficDetected += OnTrafficDetected;
@@ -515,12 +541,60 @@ namespace MakeYourChoice
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (_awsRefreshCts != null)
+            {
+                _awsRefreshCts.Cancel();
+                _awsRefreshCts.Dispose();
+                _awsRefreshCts = null;
+            }
+
             if (_sniffer != null)
             {
                 _sniffer.TrafficDetected -= OnTrafficDetected;
                 _sniffer.Stop();
             }
             base.OnFormClosing(e);
+        }
+
+        private void StartAwsRangesRefreshLoop()
+        {
+            if (_awsService == null)
+            {
+                return;
+            }
+
+            if (_awsRefreshCts != null)
+            {
+                _awsRefreshCts.Cancel();
+                _awsRefreshCts.Dispose();
+            }
+
+            _awsRefreshCts = new System.Threading.CancellationTokenSource();
+            var token = _awsRefreshCts.Token;
+
+            _awsRefreshTask = Task.Run(async () =>
+            {
+                // Bootstrap once at startup.
+                await _awsService.RefreshRangesPeriodicallyAsync().ConfigureAwait(false);
+
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        var intervalMinutes = GetAwsFetchIntervalMinutes();
+                        await Task.Delay(TimeSpan.FromMinutes(intervalMinutes), token).ConfigureAwait(false);
+                        await _awsService.RefreshRangesPeriodicallyAsync().ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch
+                    {
+                        // Ignore refresh errors and retry on next interval.
+                    }
+                }
+            }, token);
         }
 
         private async void OnTrafficDetected(string ip, int port)
@@ -2225,7 +2299,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 6,
+                RowCount = 7,
                 Padding = new Padding(0)
             };
 
@@ -2305,6 +2379,86 @@ namespace MakeYourChoice
             tlpBlock.Controls.Add(rbService, 0, 2);
             tlpBlock.Controls.Add(cbMergeUnstable, 0, 3);
             blockPanel.Controls.Add(tlpBlock);
+
+            // ── Connectivity ──────────────────────────────────────────
+            var connectivityPanel = new GroupBox
+            {
+                Text = "Connectivity",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10),
+                Dock = DockStyle.Fill
+            };
+            var tlpConnectivity = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 3
+            };
+            var lblFetchAws = new Label
+            {
+                Text = "Fetch AWS ranges every",
+                AutoSize = true,
+                Margin = new Padding(3, 0, 3, 2)
+            };
+            var sliderPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 2,
+                Margin = new Padding(0)
+            };
+            sliderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            sliderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            var trackFetchAws = new TrackBar
+            {
+                Minimum = 0,
+                Maximum = AwsFetchIntervalOptionsMinutes.Length - 1,
+                TickStyle = TickStyle.Both,
+                TickFrequency = 1,
+                SmallChange = 1,
+                LargeChange = 1,
+                Width = 250,
+                Margin = new Padding(0, 0, 8, 0)
+            };
+            trackFetchAws.Value = AwsFetchIntervalIndex(_awsFetchIntervalMinutes);
+
+            var lblFetchValue = new Label
+            {
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 0, 0, 0)
+            };
+
+            void UpdateFetchValueLabel()
+            {
+                var minutes = AwsFetchIntervalOptionsMinutes[trackFetchAws.Value];
+                lblFetchValue.Text = $"{minutes} minutes";
+            }
+
+            trackFetchAws.ValueChanged += (_, __) => UpdateFetchValueLabel();
+            UpdateFetchValueLabel();
+
+            var lblFetchHint = new Label
+            {
+                Text = "Options: 2, 5, 10, 20, 45, or 60 minutes.",
+                AutoSize = true,
+                MaximumSize = new Size(320, 0),
+                ForeColor = Color.DimGray,
+                Margin = new Padding(3, 4, 3, 0)
+            };
+
+            sliderPanel.Controls.Add(trackFetchAws, 0, 0);
+            sliderPanel.Controls.Add(lblFetchValue, 1, 0);
+            tlpConnectivity.Controls.Add(lblFetchAws, 0, 0);
+            tlpConnectivity.Controls.Add(sliderPanel, 0, 1);
+            tlpConnectivity.Controls.Add(lblFetchHint, 0, 2);
+            connectivityPanel.Controls.Add(tlpConnectivity);
 
             // Initialize selections
             rbBoth.Checked = _blockMode == BlockMode.Both;
@@ -2471,6 +2625,7 @@ namespace MakeYourChoice
                 cbApplyMode.SelectedIndex = 0;
                 rbBoth.Checked = true;
                 cbMergeUnstable.Checked = true;
+                trackFetchAws.Value = AwsFetchIntervalIndex(10);
                 tbGamePath.Text = string.Empty;
                 cbDarkMode.Checked = false;
             };
@@ -2480,10 +2635,11 @@ namespace MakeYourChoice
 
             tlpMain.Controls.Add(modePanel, 0, 0);
             tlpMain.Controls.Add(blockPanel, 0, 1);
-            tlpMain.Controls.Add(experimentalPanel, 0, 2);
-            tlpMain.Controls.Add(gamePanel, 0, 3);
-            tlpMain.Controls.Add(lblTipSettings, 0, 4);
-            tlpMain.Controls.Add(buttonPanel, 0, 5);
+            tlpMain.Controls.Add(connectivityPanel, 0, 2);
+            tlpMain.Controls.Add(experimentalPanel, 0, 3);
+            tlpMain.Controls.Add(gamePanel, 0, 4);
+            tlpMain.Controls.Add(lblTipSettings, 0, 5);
+            tlpMain.Controls.Add(buttonPanel, 0, 6);
 
             dialog.Controls.Add(tlpMain);
             dialog.AcceptButton = btnOk;
@@ -2516,8 +2672,10 @@ namespace MakeYourChoice
                     else                      _blockMode = BlockMode.OnlyService;
                 }
                 _mergeUnstable = cbMergeUnstable.Checked;
+                _awsFetchIntervalMinutes = AwsFetchIntervalOptionsMinutes[trackFetchAws.Value];
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
+                StartAwsRangesRefreshLoop();
                 SaveSettings();
                 ApplyTheme();
                 UpdateRegionListViewAppearance();

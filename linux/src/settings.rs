@@ -12,6 +12,12 @@ pub struct UserSettings {
     pub last_launched_version: String,
     pub game_path: String,
     pub auto_update_check_paused_until: Option<String>,
+    #[serde(default = "default_aws_fetch_interval_minutes")]
+    pub aws_fetch_interval_minutes: u32,
+}
+
+fn default_aws_fetch_interval_minutes() -> u32 {
+    10
 }
 
 impl Default for UserSettings {
@@ -23,6 +29,7 @@ impl Default for UserSettings {
             last_launched_version: String::new(),
             game_path: String::new(),
             auto_update_check_paused_until: None,
+            aws_fetch_interval_minutes: default_aws_fetch_interval_minutes(),
         }
     }
 }
