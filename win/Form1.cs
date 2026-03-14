@@ -161,6 +161,10 @@ namespace MakeYourChoice
         private bool _darkMode = false;
         private Label _lblConnectedToValue;
         private Label _lblConnectionDot; 
+        private Panel _firewallProgressBottomDivider;
+        private FlowLayoutPanel _flpFirewallProgress;
+        private Label _lblFirewallProgress;
+        private ProgressBar _pbFirewallProgress;
         private TrafficSniffer _sniffer;
         private bool _snifferStarted;
         private AwsIpService _awsService;
@@ -168,6 +172,7 @@ namespace MakeYourChoice
         private Task _awsRefreshTask;
         private int _awsFetchIntervalMinutes = 10;
         private HashSet<string> _firewallBlockedRegionKeys = new(StringComparer.Ordinal);
+        private int _firewallRefreshInProgress;
         private string _lastDetectedIp;
         private int _lastDetectedPort;
         private string _lastDetectedRegion;
@@ -209,6 +214,21 @@ namespace MakeYourChoice
             public int Current { get; }
             public int Total { get; }
             public string Message { get; }
+        }
+
+        private sealed class CallbackProgress<T> : IProgress<T>
+        {
+            private readonly Action<T> _callback;
+
+            public CallbackProgress(Action<T> callback)
+            {
+                _callback = callback;
+            }
+
+            public void Report(T value)
+            {
+                _callback?.Invoke(value);
+            }
         }
 
         private class UserSettings
@@ -643,6 +663,7 @@ namespace MakeYourChoice
                 await _awsService.RefreshRangesPeriodicallyAsync().ConfigureAwait(false);
                 if (_applyMode == ApplyMode.Firewall)
                 {
+                    await Task.Delay(TimeSpan.FromSeconds(10), token).ConfigureAwait(false);
                     _ = TryRefreshFirewallRules(forceAwsRefresh: false, showErrors: false);
                 }
 
@@ -655,6 +676,7 @@ namespace MakeYourChoice
                         await _awsService.RefreshRangesPeriodicallyAsync().ConfigureAwait(false);
                         if (_applyMode == ApplyMode.Firewall)
                         {
+                            await Task.Delay(TimeSpan.FromSeconds(10), token).ConfigureAwait(false);
                             _ = TryRefreshFirewallRules(forceAwsRefresh: false, showErrors: false);
                         }
                     }
@@ -1114,15 +1136,53 @@ namespace MakeYourChoice
                 Margin = new Padding(0, 0, 0, 6)
             };
 
+            _flpFirewallProgress = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(5, 0, 5, 0),
+                Margin = new Padding(0),
+                WrapContents = false,
+                Visible = false
+            };
+            _lblFirewallProgress = new Label
+            {
+                Text = "Writing firewall rules.",
+                AutoSize = true,
+                Margin = new Padding(8, 3, 0, 0),
+                Font = new Font(SystemFonts.DefaultFont, FontStyle.Italic)
+            };
+            _pbFirewallProgress = new ProgressBar
+            {
+                Width = 170,
+                Height = 16,
+                Style = ProgressBarStyle.Marquee,
+                MarqueeAnimationSpeed = 25,
+                Margin = new Padding(0, 2, 0, 0)
+            };
+            _flpFirewallProgress.Controls.Add(_pbFirewallProgress);
+            _flpFirewallProgress.Controls.Add(_lblFirewallProgress);
+
+            _firewallProgressBottomDivider = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 1,
+                BackColor = _darkMode ? Color.FromArgb(60, 60, 60) : Color.Gainsboro,
+                Margin = new Padding(0, 4, 0, 6),
+                Visible = false
+            };
+
             var tlp = new TableLayoutPanel
             {
                 Dock        = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount    = 6
+                RowCount    = 8
             };
             tlp.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // menu
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // divider
+            tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // firewall progress
+            tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // firewall divider
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // connected info
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // tip
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // buttons
@@ -1130,9 +1190,11 @@ namespace MakeYourChoice
             tlp.Controls.Add(_lv,          0, 0);
             tlp.Controls.Add(_menuStrip,   0, 1);
             tlp.Controls.Add(menuDivider,  0, 2);
-            tlp.Controls.Add(flpConnection, 0, 3);
-            tlp.Controls.Add(_lblTip,      0, 4);
-            tlp.Controls.Add(_buttonPanel, 0, 5);
+            tlp.Controls.Add(_flpFirewallProgress, 0, 3);
+            tlp.Controls.Add(_firewallProgressBottomDivider, 0, 4);
+            tlp.Controls.Add(flpConnection, 0, 5);
+            tlp.Controls.Add(_lblTip,      0, 6);
+            tlp.Controls.Add(_buttonPanel, 0, 7);
 
             Controls.Add(tlp);
         }
@@ -1806,13 +1868,62 @@ namespace MakeYourChoice
             return "@(" + string.Join(",", escaped) + ")";
         }
 
+        private static string BuildFirewallRuleSignature(string displayName, IEnumerable<string> remoteAddresses)
+        {
+            var normalizedAddresses = (remoteAddresses ?? Enumerable.Empty<string>())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v.Trim())
+                .OrderBy(v => v, StringComparer.OrdinalIgnoreCase);
+
+            return displayName + "||UDP||" + MatchmakingPortRange + "||" + string.Join(",", normalizedAddresses);
+        }
+
+        private bool TryGetCurrentManagedFirewallRuleSignatures(out HashSet<string> signatures, out string error)
+        {
+            signatures = new HashSet<string>(StringComparer.Ordinal);
+            error = null;
+
+            var escapedGroup = EscapePowerShellSingleQuoted(FirewallRuleGroup);
+            var script =
+                "$ErrorActionPreference = 'Stop'; " +
+                "$rules = Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue | " +
+                "Where-Object { $_.Group -eq '" + escapedGroup + "' } | Sort-Object DisplayName; " +
+                "foreach ($r in $rules) { " +
+                "  $addr = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r | Select-Object -ExpandProperty RemoteAddress); " +
+                "  $addr = $addr | Sort-Object; " +
+                "  $port = (Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r | Select-Object -First 1 -ExpandProperty RemotePort); " +
+                "  $proto = (Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r | Select-Object -First 1 -ExpandProperty Protocol); " +
+                "  Write-Output ($r.DisplayName + '||' + $proto + '||' + $port + '||' + [string]::Join(',', $addr)); " +
+                "}";
+
+            if (!RunPowerShellCapture(script, out var output, out var errorDetails))
+            {
+                error = string.IsNullOrWhiteSpace(errorDetails)
+                    ? "Failed to read existing firewall rules."
+                    : $"Failed to read existing firewall rules.\n\n{errorDetails}";
+                return false;
+            }
+
+            foreach (var rawLine in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var line = rawLine.Trim();
+                if (!string.IsNullOrWhiteSpace(line))
+                {
+                    signatures.Add(line);
+                }
+            }
+
+            return true;
+        }
+
         private static string EscapePowerShellSingleQuoted(string input)
         {
             return (input ?? string.Empty).Replace("'", "''");
         }
 
-        private bool RunPowerShell(string script, out string errorDetails)
+        private bool RunPowerShellCapture(string script, out string stdout, out string errorDetails)
         {
+            stdout = string.Empty;
             errorDetails = string.Empty;
             try
             {
@@ -1827,13 +1938,17 @@ namespace MakeYourChoice
                 using var proc = Process.Start(psi);
                 if (proc == null)
                 {
-                    errorDetails = "Failed to start netsh process.";
+                    errorDetails = "Failed to start PowerShell process.";
                     return false;
                 }
 
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
                 proc.WaitForExit();
-                var stdout = (proc.StandardOutput.ReadToEnd() ?? string.Empty).Trim();
-                var stderr = (proc.StandardError.ReadToEnd() ?? string.Empty).Trim();
+                Task.WaitAll(stdoutTask, stderrTask);
+
+                stdout = (stdoutTask.Result ?? string.Empty).Trim();
+                var stderr = (stderrTask.Result ?? string.Empty).Trim();
 
                 if (proc.ExitCode == 0)
                 {
@@ -1860,6 +1975,11 @@ namespace MakeYourChoice
                 errorDetails = ex.Message;
                 return false;
             }
+        }
+
+        private bool RunPowerShell(string script, out string errorDetails)
+        {
+            return RunPowerShellCapture(script, out _, out errorDetails);
         }
 
         private bool ClearManagedFirewallRules(out string error)
@@ -1892,97 +2012,140 @@ namespace MakeYourChoice
         {
             error = null;
 
-            progress?.Report(new FirewallProgressState(0, 0, "Preparing firewall update..."));
-
-            if (forceAwsRefresh)
+            if (System.Threading.Interlocked.CompareExchange(ref _firewallRefreshInProgress, 1, 0) != 0)
             {
-                progress?.Report(new FirewallProgressState(0, 0, "Refreshing AWS ranges..."));
-                _awsService.RefreshRangesPeriodicallyAsync().GetAwaiter().GetResult();
-            }
-
-            progress?.Report(new FirewallProgressState(0, 0, "Clearing managed firewall rules..."));
-            if (!ClearManagedFirewallRules(out var clearError))
-            {
-                error = clearError;
+                error = "A firewall refresh is already in progress.";
                 return false;
             }
 
-            progress?.Report(new FirewallProgressState(0, 0, "Collecting blocked AWS ranges..."));
-
-            var blockedRegionCodes = blockedRegionKeys
-                .Select(GetAwsRegionCodeForDisplayRegion)
-                .Where(code => !string.IsNullOrWhiteSpace(code))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            var allCidrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var regionCode in blockedRegionCodes)
+            try
             {
-                var cidrs = _awsService.GetCidrsForRegionCodeAsync(regionCode)
-                    .GetAwaiter()
-                    .GetResult()
-                    .Where(IsValidFirewallRemoteAddress)
-                    .ToList();
-                foreach (var cidr in cidrs)
+                SetFirewallRefreshUiVisible(true);
+                if (progress == null)
                 {
-                    allCidrs.Add(cidr);
+                    UpdateInlineFirewallProgress(new FirewallProgressState(0, 0, "Writing firewall rules."));
                 }
-            }
 
-            var uniqueCidrs = allCidrs.OrderBy(c => c, StringComparer.Ordinal).ToList();
-            var remoteIpChunks = ChunkRemoteIps(uniqueCidrs, FirewallRemoteIpChunkSize).ToList();
+                progress?.Report(new FirewallProgressState(0, 0, "Preparing firewall update..."));
 
-            if (remoteIpChunks.Count == 0)
-            {
-                error = "No AWS IP ranges were found for the regions that should be blocked.";
-                return false;
-            }
-
-            progress?.Report(new FirewallProgressState(0, remoteIpChunks.Count, $"Applying {remoteIpChunks.Count} firewall rule chunk(s)..."));
-
-            int addedRuleCount = 0;
-            int chunkIndex = 1;
-            foreach (var cidrChunk in remoteIpChunks)
-            {
-                progress?.Report(new FirewallProgressState(chunkIndex - 1, remoteIpChunks.Count, $"Applying firewall rules... ({chunkIndex}/{remoteIpChunks.Count})"));
-
-                var ruleName = $"Make Your Choice - DbD - Blocked ({chunkIndex})";
-                var remoteIpArrayLiteral = ToPowerShellStringArrayLiteral(cidrChunk);
-
-                var escapedRuleName = EscapePowerShellSingleQuoted(ruleName);
-                var escapedGroup = EscapePowerShellSingleQuoted(FirewallRuleGroup);
-                var escapedDescription = EscapePowerShellSingleQuoted(FirewallRuleDescription);
-                var escapedPorts = EscapePowerShellSingleQuoted(MatchmakingPortRange);
-
-                var addScript =
-                    "New-NetFirewallRule " +
-                    "-DisplayName '" + escapedRuleName + "' " +
-                    "-Direction Outbound " +
-                    "-Action Block " +
-                    "-Enabled True " +
-                    "-Profile Any " +
-                    "-Protocol UDP " +
-                    "-RemotePort '" + escapedPorts + "' " +
-                    "-RemoteAddress " + remoteIpArrayLiteral + " " +
-                    "-Group '" + escapedGroup + "' " +
-                    "-Description '" + escapedDescription + "'";
-
-                if (!RunPowerShell(addScript, out var errorDetails))
+                if (forceAwsRefresh)
                 {
-                    error = string.IsNullOrWhiteSpace(errorDetails)
-                        ? "Failed to add firewall rules."
-                        : $"Failed to add firewall rule chunk {chunkIndex}.\n\n{errorDetails}";
+                    progress?.Report(new FirewallProgressState(0, 0, "Refreshing AWS ranges..."));
+                    _awsService.RefreshRangesPeriodicallyAsync().GetAwaiter().GetResult();
+                }
+
+                progress?.Report(new FirewallProgressState(0, 0, "Collecting blocked AWS ranges..."));
+
+                var blockedRegionCodes = blockedRegionKeys
+                    .Select(GetAwsRegionCodeForDisplayRegion)
+                    .Where(code => !string.IsNullOrWhiteSpace(code))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var allCidrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var regionCode in blockedRegionCodes)
+                {
+                    var cidrs = _awsService.GetCidrsForRegionCodeAsync(regionCode)
+                        .GetAwaiter()
+                        .GetResult()
+                        .Where(IsValidFirewallRemoteAddress)
+                        .ToList();
+                    foreach (var cidr in cidrs)
+                    {
+                        allCidrs.Add(cidr);
+                    }
+                }
+
+                var uniqueCidrs = allCidrs.OrderBy(c => c, StringComparer.Ordinal).ToList();
+                var remoteIpChunks = ChunkRemoteIps(uniqueCidrs, FirewallRemoteIpChunkSize).ToList();
+
+                if (remoteIpChunks.Count == 0)
+                {
+                    error = "No AWS IP ranges were found for the regions that should be blocked.";
                     return false;
                 }
 
-                addedRuleCount++;
-                chunkIndex++;
+                var desiredRuleSignatures = new HashSet<string>(StringComparer.Ordinal);
+                int desiredChunkIndex = 1;
+                foreach (var cidrChunk in remoteIpChunks)
+                {
+                    var displayName = $"Make Your Choice - DbD - Blocked ({desiredChunkIndex})";
+                    desiredRuleSignatures.Add(BuildFirewallRuleSignature(displayName, cidrChunk));
+                    desiredChunkIndex++;
+                }
+
+                progress?.Report(new FirewallProgressState(0, remoteIpChunks.Count, "Checking existing firewall rules..."));
+                if (!TryGetCurrentManagedFirewallRuleSignatures(out var currentRuleSignatures, out var readRulesError))
+                {
+                    error = readRulesError;
+                    return false;
+                }
+
+                if (desiredRuleSignatures.SetEquals(currentRuleSignatures))
+                {
+                    progress?.Report(new FirewallProgressState(remoteIpChunks.Count, remoteIpChunks.Count, "Firewall rules are already up to date."));
+                    _firewallBlockedRegionKeys = new HashSet<string>(blockedRegionKeys, StringComparer.Ordinal);
+                    return true;
+                }
+
+                progress?.Report(new FirewallProgressState(0, remoteIpChunks.Count, "Clearing managed firewall rules..."));
+                if (!ClearManagedFirewallRules(out var clearError))
+                {
+                    error = clearError;
+                    return false;
+                }
+
+                progress?.Report(new FirewallProgressState(0, remoteIpChunks.Count, $"Applying {remoteIpChunks.Count} firewall rule chunk(s)..."));
+
+                int addedRuleCount = 0;
+                int chunkIndex = 1;
+                foreach (var cidrChunk in remoteIpChunks)
+                {
+                    progress?.Report(new FirewallProgressState(chunkIndex - 1, remoteIpChunks.Count, $"Applying firewall rules... ({chunkIndex}/{remoteIpChunks.Count})"));
+
+                    var ruleName = $"Make Your Choice - DbD - Blocked ({chunkIndex})";
+                    var remoteIpArrayLiteral = ToPowerShellStringArrayLiteral(cidrChunk);
+
+                    var escapedRuleName = EscapePowerShellSingleQuoted(ruleName);
+                    var escapedGroup = EscapePowerShellSingleQuoted(FirewallRuleGroup);
+                    var escapedDescription = EscapePowerShellSingleQuoted(FirewallRuleDescription);
+                    var escapedPorts = EscapePowerShellSingleQuoted(MatchmakingPortRange);
+
+                    var addScript =
+                        "New-NetFirewallRule " +
+                        "-DisplayName '" + escapedRuleName + "' " +
+                        "-Direction Outbound " +
+                        "-Action Block " +
+                        "-Enabled True " +
+                        "-Profile Any " +
+                        "-Protocol UDP " +
+                        "-RemotePort '" + escapedPorts + "' " +
+                        "-RemoteAddress " + remoteIpArrayLiteral + " " +
+                        "-Group '" + escapedGroup + "' " +
+                        "-Description '" + escapedDescription + "'";
+
+                    if (!RunPowerShell(addScript, out var errorDetails))
+                    {
+                        error = string.IsNullOrWhiteSpace(errorDetails)
+                            ? "Failed to add firewall rules."
+                            : $"Failed to add firewall rule chunk {chunkIndex}.\n\n{errorDetails}";
+                        return false;
+                    }
+
+                    addedRuleCount++;
+                    chunkIndex++;
+                }
+
+                progress?.Report(new FirewallProgressState(remoteIpChunks.Count, remoteIpChunks.Count, "Finalizing..."));
+
+                _firewallBlockedRegionKeys = new HashSet<string>(blockedRegionKeys, StringComparer.Ordinal);
+                return true;
             }
-
-            progress?.Report(new FirewallProgressState(remoteIpChunks.Count, remoteIpChunks.Count, "Finalizing..."));
-
-            _firewallBlockedRegionKeys = new HashSet<string>(blockedRegionKeys, StringComparer.Ordinal);
-            return true;
+            finally
+            {
+                SetFirewallRefreshUiVisible(false);
+                System.Threading.Interlocked.Exchange(ref _firewallRefreshInProgress, 0);
+            }
         }
 
         private bool ApplyCurrentFirewallRulesWithProgressDialog(bool forceAwsRefresh, out string error)
@@ -2003,6 +2166,101 @@ namespace MakeYourChoice
             }
 
             return ApplyFirewallRulesWithProgressDialog(blockedRegionKeys, forceAwsRefresh, out error);
+        }
+
+        private void SetFirewallRefreshUiVisible(bool visible)
+        {
+            void ApplyUi()
+            {
+                if (_flpFirewallProgress != null)
+                {
+                    _flpFirewallProgress.Visible = visible;
+                }
+
+                if (_firewallProgressBottomDivider != null)
+                {
+                    _firewallProgressBottomDivider.Visible = visible;
+                }
+
+                if (_btnApply != null)
+                {
+                    _btnApply.Enabled = !visible;
+                }
+            }
+
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                BeginInvoke((Action)ApplyUi);
+            }
+            else
+            {
+                ApplyUi();
+            }
+        }
+
+        private void UpdateInlineFirewallProgress(FirewallProgressState state)
+        {
+            void ApplyUi()
+            {
+                SetFirewallRefreshUiVisible(true);
+
+                if (_lblFirewallProgress != null && !string.IsNullOrWhiteSpace(state.Message))
+                {
+                    _lblFirewallProgress.Text = state.Message;
+                }
+
+                if (_pbFirewallProgress != null)
+                {
+                    if (state.Total > 0)
+                    {
+                        _pbFirewallProgress.Style = ProgressBarStyle.Continuous;
+                        _pbFirewallProgress.Maximum = Math.Max(1, state.Total);
+                        _pbFirewallProgress.Value = Math.Min(_pbFirewallProgress.Maximum, Math.Max(0, state.Current));
+                    }
+                    else
+                    {
+                        _pbFirewallProgress.Style = ProgressBarStyle.Marquee;
+                    }
+                }
+            }
+
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                BeginInvoke((Action)ApplyUi);
+            }
+            else
+            {
+                ApplyUi();
+            }
+        }
+
+        private async Task<(bool Success, string Error)> ApplyFirewallRulesInlineAsync(HashSet<string> blockedRegionKeys, bool forceAwsRefresh)
+        {
+            var progress = new CallbackProgress<FirewallProgressState>(UpdateInlineFirewallProgress);
+            return await Task.Run(() =>
+            {
+                var ok = ApplyFirewallRules(blockedRegionKeys, forceAwsRefresh, out var applyError, progress);
+                return (ok, applyError);
+            });
+        }
+
+        private async Task<(bool Success, string Error)> ApplyCurrentFirewallRulesInlineAsync(bool forceAwsRefresh)
+        {
+            var blockedRegionKeys = _firewallBlockedRegionKeys.Count > 0
+                ? new HashSet<string>(_firewallBlockedRegionKeys, StringComparer.Ordinal)
+                : null;
+
+            if (blockedRegionKeys == null)
+            {
+                if (!BuildFirewallBlockedRegionSetFromSelection(out blockedRegionKeys, out var buildError))
+                {
+                    return (false, buildError);
+                }
+            }
+
+            return await ApplyFirewallRulesInlineAsync(blockedRegionKeys, forceAwsRefresh);
         }
 
         private bool ApplyFirewallRulesWithProgressDialog(
@@ -2086,6 +2344,15 @@ namespace MakeYourChoice
                 });
             };
 
+            progressDialog.FormClosing += (_, e) =>
+            {
+                // Keep dialog open until work completes to avoid blocking on task result after an early close.
+                if (workTask != null && !workTask.IsCompleted)
+                {
+                    e.Cancel = true;
+                }
+            };
+
             progressDialog.ShowDialog(this);
 
             if (workTask == null)
@@ -2128,11 +2395,15 @@ namespace MakeYourChoice
                 }
             }
 
-            if (!ApplyFirewallRules(blockedRegionKeys, forceAwsRefresh, out var applyError))
+            var progress = new CallbackProgress<FirewallProgressState>(UpdateInlineFirewallProgress);
+            if (!ApplyFirewallRules(blockedRegionKeys, forceAwsRefresh, out var applyError, progress))
             {
                 if (showErrors)
                 {
-                    ShowFirewallErrorDialog("Firewall", applyError);
+                    if (!string.Equals(applyError, "A firewall refresh is already in progress.", StringComparison.Ordinal))
+                    {
+                        ShowFirewallErrorDialog("Firewall", applyError);
+                    }
                 }
                 return false;
             }
@@ -2487,7 +2758,7 @@ namespace MakeYourChoice
             return true;
         }
 
-        private void BtnApply_Click(object sender, EventArgs e)
+        private async void BtnApply_Click(object sender, EventArgs e)
         {
             if (_applyMode == ApplyMode.Firewall)
             {
@@ -2497,9 +2768,13 @@ namespace MakeYourChoice
                     return;
                 }
 
-                if (!ApplyFirewallRulesWithProgressDialog(blockedRegionKeys, forceAwsRefresh: false, out var firewallError))
+                var firewallResult = await ApplyFirewallRulesInlineAsync(blockedRegionKeys, forceAwsRefresh: false);
+                if (!firewallResult.Success)
                 {
-                    ShowFirewallErrorDialog("Firewall", firewallError);
+                    if (!string.Equals(firewallResult.Error, "A firewall refresh is already in progress.", StringComparison.Ordinal))
+                    {
+                        ShowFirewallErrorDialog("Firewall", firewallResult.Error);
+                    }
                     return;
                 }
 
@@ -3141,7 +3416,7 @@ namespace MakeYourChoice
                 MaximumSize = new Size(320, 0),
                 Margin = new Padding(3, 0, 3, 0)
             };
-            btnRefreshFirewall.Click += (_, __) =>
+            btnRefreshFirewall.Click += async (_, __) =>
             {
                 if (cbApplyMode.SelectedIndex != 1)
                 {
@@ -3163,7 +3438,8 @@ namespace MakeYourChoice
                     return;
                 }
 
-                if (ApplyCurrentFirewallRulesWithProgressDialog(forceAwsRefresh: true, out var refreshError))
+                var refreshResult = await ApplyCurrentFirewallRulesInlineAsync(forceAwsRefresh: true);
+                if (refreshResult.Success)
                 {
                     MessageBox.Show(
                         "Firewall rules were refreshed successfully.",
@@ -3173,7 +3449,10 @@ namespace MakeYourChoice
                 }
                 else
                 {
-                    ShowFirewallErrorDialog("Firewall", refreshError);
+                    if (!string.Equals(refreshResult.Error, "A firewall refresh is already in progress.", StringComparison.Ordinal))
+                    {
+                        ShowFirewallErrorDialog("Firewall", refreshResult.Error);
+                    }
                 }
             };
 
@@ -3516,14 +3795,6 @@ namespace MakeYourChoice
                         ShowFirewallErrorDialog(
                             "Firewall",
                             $"Failed to clear managed firewall rules.\n\n{clearError}");
-                    }
-                }
-
-                if (_applyMode == ApplyMode.Firewall)
-                {
-                    if (!ApplyCurrentFirewallRulesWithProgressDialog(forceAwsRefresh: true, out var applyError))
-                    {
-                        ShowFirewallErrorDialog("Firewall", applyError);
                     }
                 }
 
