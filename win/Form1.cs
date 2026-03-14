@@ -173,6 +173,7 @@ namespace MakeYourChoice
         private int _awsFetchIntervalMinutes = 10;
         private HashSet<string> _firewallBlockedRegionKeys = new(StringComparer.Ordinal);
         private int _firewallRefreshInProgress;
+        private System.Threading.CancellationTokenSource _firewallCompletionMessageCts;
         private string _lastDetectedIp;
         private int _lastDetectedPort;
         private string _lastDetectedRegion;
@@ -638,6 +639,8 @@ namespace MakeYourChoice
                 _sniffer.TrafficDetected -= OnTrafficDetected;
                 _sniffer.Stop();
             }
+
+            CancelPendingFirewallCompletionMessage();
             base.OnFormClosing(e);
         }
 
@@ -1872,10 +1875,118 @@ namespace MakeYourChoice
         {
             var normalizedAddresses = (remoteAddresses ?? Enumerable.Empty<string>())
                 .Where(v => !string.IsNullOrWhiteSpace(v))
-                .Select(v => v.Trim())
+                .Select(NormalizeFirewallAddressForSignature)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(v => v, StringComparer.OrdinalIgnoreCase);
 
             return displayName + "||UDP||" + MatchmakingPortRange + "||" + string.Join(",", normalizedAddresses);
+        }
+
+        private static string NormalizeFirewallAddressForSignature(string value)
+        {
+            var trimmed = (value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return string.Empty;
+            }
+
+            // PowerShell may return host addresses as bare IPs even if originally provided as /32.
+            if (IPAddress.TryParse(trimmed, out var bareIp))
+            {
+                if (bareIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    return bareIp + "/32";
+                }
+
+                if (bareIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+                {
+                    return bareIp + "/128";
+                }
+            }
+
+            var slashIndex = trimmed.IndexOf('/');
+            if (slashIndex <= 0 || slashIndex >= trimmed.Length - 1)
+            {
+                return trimmed;
+            }
+
+            var ipPart = trimmed[..slashIndex].Trim();
+            var suffix = trimmed[(slashIndex + 1)..].Trim();
+            if (!IPAddress.TryParse(ipPart, out var ip) || ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                return trimmed;
+            }
+
+            if (int.TryParse(suffix, out var prefixLen) && prefixLen >= 0 && prefixLen <= 32)
+            {
+                return ipPart + "/" + prefixLen;
+            }
+
+            if (TryConvertSubnetMaskToPrefixLength(suffix, out var convertedPrefix))
+            {
+                return ipPart + "/" + convertedPrefix;
+            }
+
+            return trimmed;
+        }
+
+        private static bool TryConvertSubnetMaskToPrefixLength(string subnetMask, out int prefixLength)
+        {
+            prefixLength = 0;
+            if (!IPAddress.TryParse(subnetMask, out var maskIp) || maskIp.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                return false;
+            }
+
+            var bytes = maskIp.GetAddressBytes();
+            bool sawZero = false;
+            int count = 0;
+
+            foreach (var b in bytes)
+            {
+                for (int bit = 7; bit >= 0; bit--)
+                {
+                    bool isSet = (b & (1 << bit)) != 0;
+                    if (sawZero && isSet)
+                    {
+                        return false;
+                    }
+                    if (isSet)
+                    {
+                        count++;
+                    }
+                    else
+                    {
+                        sawZero = true;
+                    }
+                }
+            }
+
+            prefixLength = count;
+            return true;
+        }
+
+        private static string NormalizeFirewallSignatureLine(string rawLine)
+        {
+            var line = (rawLine ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                return string.Empty;
+            }
+
+            var parts = line.Split(new[] { "||" }, StringSplitOptions.None);
+            if (parts.Length < 4)
+            {
+                return line;
+            }
+
+            var displayName = parts[0].Trim();
+            var addresses = parts[3]
+                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormalizeFirewallAddressForSignature)
+                .Where(v => !string.IsNullOrWhiteSpace(v));
+
+            return BuildFirewallRuleSignature(displayName, addresses);
         }
 
         private bool TryGetCurrentManagedFirewallRuleSignatures(out HashSet<string> signatures, out string error)
@@ -1891,9 +2002,7 @@ namespace MakeYourChoice
                 "foreach ($r in $rules) { " +
                 "  $addr = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r | Select-Object -ExpandProperty RemoteAddress); " +
                 "  $addr = $addr | Sort-Object; " +
-                "  $port = (Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r | Select-Object -First 1 -ExpandProperty RemotePort); " +
-                "  $proto = (Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r | Select-Object -First 1 -ExpandProperty Protocol); " +
-                "  Write-Output ($r.DisplayName + '||' + $proto + '||' + $port + '||' + [string]::Join(',', $addr)); " +
+                "  Write-Output ($r.DisplayName + '||UDP||" + MatchmakingPortRange + "||' + [string]::Join(',', $addr)); " +
                 "}";
 
             if (!RunPowerShellCapture(script, out var output, out var errorDetails))
@@ -1906,7 +2015,7 @@ namespace MakeYourChoice
 
             foreach (var rawLine in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
             {
-                var line = rawLine.Trim();
+                var line = NormalizeFirewallSignatureLine(rawLine);
                 if (!string.IsNullOrWhiteSpace(line))
                 {
                     signatures.Add(line);
@@ -2011,6 +2120,7 @@ namespace MakeYourChoice
             IProgress<FirewallProgressState> progress = null)
         {
             error = null;
+            bool success = false;
 
             if (System.Threading.Interlocked.CompareExchange(ref _firewallRefreshInProgress, 1, 0) != 0)
             {
@@ -2020,6 +2130,7 @@ namespace MakeYourChoice
 
             try
             {
+                CancelPendingFirewallCompletionMessage();
                 SetFirewallRefreshUiVisible(true);
                 if (progress == null)
                 {
@@ -2085,6 +2196,7 @@ namespace MakeYourChoice
                 {
                     progress?.Report(new FirewallProgressState(remoteIpChunks.Count, remoteIpChunks.Count, "Firewall rules are already up to date."));
                     _firewallBlockedRegionKeys = new HashSet<string>(blockedRegionKeys, StringComparer.Ordinal);
+                    success = true;
                     return true;
                 }
 
@@ -2139,11 +2251,20 @@ namespace MakeYourChoice
                 progress?.Report(new FirewallProgressState(remoteIpChunks.Count, remoteIpChunks.Count, "Finalizing..."));
 
                 _firewallBlockedRegionKeys = new HashSet<string>(blockedRegionKeys, StringComparer.Ordinal);
+                success = true;
                 return true;
             }
             finally
             {
-                SetFirewallRefreshUiVisible(false);
+                if (success)
+                {
+                    ShowTemporaryFirewallCompletionMessage("Rules are up to date!", 2000);
+                }
+                else
+                {
+                    SetFirewallRefreshUiVisible(false);
+                }
+
                 System.Threading.Interlocked.Exchange(ref _firewallRefreshInProgress, 0);
             }
         }
@@ -2197,6 +2318,112 @@ namespace MakeYourChoice
             {
                 ApplyUi();
             }
+        }
+
+        private void CancelPendingFirewallCompletionMessage()
+        {
+            var cts = _firewallCompletionMessageCts;
+            _firewallCompletionMessageCts = null;
+
+            if (cts == null)
+            {
+                return;
+            }
+
+            try
+            {
+                cts.Cancel();
+            }
+            catch
+            {
+                // Ignore cancellation races during shutdown.
+            }
+
+            cts.Dispose();
+        }
+
+        private void ShowTemporaryFirewallCompletionMessage(string message, int durationMs)
+        {
+            CancelPendingFirewallCompletionMessage();
+
+            var cts = new System.Threading.CancellationTokenSource();
+            _firewallCompletionMessageCts = cts;
+
+            void ShowMessageUi()
+            {
+                SetFirewallRefreshUiVisible(true);
+
+                if (_lblFirewallProgress != null)
+                {
+                    _lblFirewallProgress.Text = message;
+                }
+
+                if (_pbFirewallProgress != null)
+                {
+                    _pbFirewallProgress.Style = ProgressBarStyle.Continuous;
+                    _pbFirewallProgress.Maximum = 1;
+                    _pbFirewallProgress.Value = 1;
+                }
+            }
+
+            if (!IsDisposed)
+            {
+                if (InvokeRequired)
+                {
+                    BeginInvoke((Action)ShowMessageUi);
+                }
+                else
+                {
+                    ShowMessageUi();
+                }
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(durationMs, cts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                if (cts.IsCancellationRequested || IsDisposed)
+                {
+                    return;
+                }
+
+                if (System.Threading.Interlocked.CompareExchange(ref _firewallRefreshInProgress, 0, 0) != 0)
+                {
+                    return;
+                }
+
+                void HideUi()
+                {
+                    if (IsDisposed)
+                    {
+                        return;
+                    }
+
+                    if (ReferenceEquals(_firewallCompletionMessageCts, cts))
+                    {
+                        _firewallCompletionMessageCts = null;
+                        cts.Dispose();
+                    }
+
+                    SetFirewallRefreshUiVisible(false);
+                }
+
+                if (InvokeRequired)
+                {
+                    BeginInvoke((Action)HideUi);
+                }
+                else
+                {
+                    HideUi();
+                }
+            });
         }
 
         private void UpdateInlineFirewallProgress(FirewallProgressState state)
