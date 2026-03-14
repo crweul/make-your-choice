@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -15,18 +16,20 @@ namespace MakeYourChoice
 
         private readonly struct AwsCidr
         {
-            public AwsCidr(uint network, uint mask, int prefixLength, string region)
+            public AwsCidr(uint network, uint mask, int prefixLength, string region, string cidr)
             {
                 Network = network;
                 Mask = mask;
                 PrefixLength = prefixLength;
                 Region = region;
+                Cidr = cidr;
             }
 
             public uint Network { get; }
             public uint Mask { get; }
             public int PrefixLength { get; }
             public string Region { get; }
+            public string Cidr { get; }
         }
 
         private async Task<List<AwsCidr>> FetchRangesAsync()
@@ -59,7 +62,7 @@ namespace MakeYourChoice
 
                         if (TryParseIpv4Cidr(ipPrefix, out var network, out var mask, out var prefixLength))
                         {
-                            list.Add(new AwsCidr(network, mask, prefixLength, region));
+                            list.Add(new AwsCidr(network, mask, prefixLength, region, ipPrefix));
                         }
                     }
                 }
@@ -129,6 +132,23 @@ namespace MakeYourChoice
         public Task RefreshRangesPeriodicallyAsync()
         {
             return RefreshRangesAsync();
+        }
+
+        public async Task<List<string>> GetCidrsForRegionCodeAsync(string regionCode)
+        {
+            if (string.IsNullOrWhiteSpace(regionCode))
+            {
+                return new List<string>();
+            }
+
+            await EnsureRangesLoadedAsync().ConfigureAwait(false);
+
+            var normalized = regionCode.Trim();
+            return _cidrs
+                .Where(c => string.Equals(c.Region, normalized, StringComparison.OrdinalIgnoreCase))
+                .Select(c => c.Cidr)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private bool TryParseIpv4Cidr(string cidr, out uint network, out uint mask, out int prefixLength)

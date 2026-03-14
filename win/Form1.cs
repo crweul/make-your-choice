@@ -152,7 +152,7 @@ namespace MakeYourChoice
         private Button          _btnApply;
         private Button          _btnRevert;
         private Timer           _pingTimer;
-        private enum ApplyMode { Gatekeep, UniversalRedirect }
+        private enum ApplyMode { Gatekeep, Firewall, UniversalRedirect }
         private ApplyMode _applyMode = ApplyMode.Gatekeep;
         private enum BlockMode { Both, OnlyPing, OnlyService }
         private BlockMode _blockMode = BlockMode.Both;
@@ -167,6 +167,7 @@ namespace MakeYourChoice
         private System.Threading.CancellationTokenSource _awsRefreshCts;
         private Task _awsRefreshTask;
         private int _awsFetchIntervalMinutes = 10;
+        private HashSet<string> _firewallBlockedRegionKeys = new(StringComparer.Ordinal);
         private string _lastDetectedIp;
         private int _lastDetectedPort;
         private string _lastDetectedRegion;
@@ -190,6 +191,11 @@ namespace MakeYourChoice
         private static string HostsPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System),
             "drivers\\etc\\hosts");
+
+        private const string FirewallRuleGroup = "Make Your Choice";
+        private const string FirewallRuleDescription = "Managed by Make Your Choice";
+        private const int FirewallRemoteIpChunkSize = 60;
+        private const string MatchmakingPortRange = "7777-7820";
 
         private class UserSettings
         {
@@ -220,6 +226,16 @@ namespace MakeYourChoice
         private int GetAwsFetchIntervalMinutes()
         {
             return NormalizeAwsFetchIntervalMinutes(_awsFetchIntervalMinutes);
+        }
+        
+        private void UpdateRevertButtonState()
+        {
+            if (_btnRevert == null)
+            {
+                return;
+            }
+
+            _btnRevert.Enabled = _applyMode != ApplyMode.Firewall;
         }
 
         private void LoadSettings()
@@ -253,6 +269,7 @@ namespace MakeYourChoice
             // Apply theme after loading
             ApplyTheme();
             UpdateRegionListViewAppearance();
+            UpdateRevertButtonState();
         }
 
         private void SaveSettings()
@@ -576,6 +593,10 @@ namespace MakeYourChoice
             {
                 // Bootstrap once at startup.
                 await _awsService.RefreshRangesPeriodicallyAsync().ConfigureAwait(false);
+                if (_applyMode == ApplyMode.Firewall)
+                {
+                    _ = TryRefreshFirewallRules(forceAwsRefresh: false, showErrors: false);
+                }
 
                 while (!token.IsCancellationRequested)
                 {
@@ -584,6 +605,10 @@ namespace MakeYourChoice
                         var intervalMinutes = GetAwsFetchIntervalMinutes();
                         await Task.Delay(TimeSpan.FromMinutes(intervalMinutes), token).ConfigureAwait(false);
                         await _awsService.RefreshRangesPeriodicallyAsync().ConfigureAwait(false);
+                        if (_applyMode == ApplyMode.Firewall)
+                        {
+                            _ = TryRefreshFirewallRules(forceAwsRefresh: false, showErrors: false);
+                        }
                     }
                     catch (OperationCanceledException)
                     {
@@ -1543,6 +1568,491 @@ namespace MakeYourChoice
             return hostnames.ToList();
         }
 
+        private static bool TryExtractAwsRegionCodeFromHost(string host, out string regionCode)
+        {
+            regionCode = null;
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                return false;
+            }
+
+            var parts = host.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var rawPart in parts)
+            {
+                var part = rawPart.Trim().ToLowerInvariant();
+                if (part.Count(c => c == '-') < 2)
+                {
+                    continue;
+                }
+
+                if (!char.IsDigit(part[^1]))
+                {
+                    continue;
+                }
+
+                if (!part.All(c => char.IsLetterOrDigit(c) || c == '-'))
+                {
+                    continue;
+                }
+
+                regionCode = part;
+                return true;
+            }
+
+            return false;
+        }
+
+        private string GetAwsRegionCodeForDisplayRegion(string displayRegion)
+        {
+            if (_regions.TryGetValue(displayRegion, out var regionInfo))
+            {
+                foreach (var host in regionInfo.Hosts)
+                {
+                    if (TryExtractAwsRegionCodeFromHost(host, out var code))
+                    {
+                        return code;
+                    }
+                }
+            }
+
+            if (_blockedRegions.TryGetValue(displayRegion, out var blockedInfo))
+            {
+                foreach (var host in blockedInfo.Hosts)
+                {
+                    if (TryExtractAwsRegionCodeFromHost(host, out var code))
+                    {
+                        return code;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private bool BuildFirewallBlockedRegionSetFromSelection(out HashSet<string> blockedRegionKeys, out string error)
+        {
+            blockedRegionKeys = null;
+            error = null;
+
+            var selectedItems = _lv.CheckedItems.Cast<ListViewItem>()
+                .Where(item => item.Tag is string)
+                .ToList();
+            if (selectedItems.Count == 0)
+            {
+                error = "Please select at least one server to allow.";
+                return false;
+            }
+
+            var selectedRegions = selectedItems
+                .Select(item => (string)item.Tag)
+                .ToList();
+            bool anyStableSelected = selectedRegions.Any(regionKey => _regions[regionKey].Stable);
+
+            if (_mergeUnstable && !anyStableSelected)
+            {
+                var missing = new List<string>();
+                foreach (var region in selectedRegions)
+                {
+                    if (!_regions[region].Stable)
+                    {
+                        var group = GetGroupName(region);
+                        bool stableExists = _regions.Any(kv => GetGroupName(kv.Key) == group && kv.Value.Stable);
+                        if (!stableExists)
+                        {
+                            missing.Add(region);
+                        }
+                    }
+                }
+
+                if (missing.Count > 0)
+                {
+                    error = "Merge unstable servers option is enabled, but no stable servers found for: " +
+                            string.Join(", ", missing) +
+                            ". Disable merging unstable servers in the options menu or select a stable server manually.";
+                    return false;
+                }
+            }
+
+            var allowedSet = new HashSet<string>(selectedRegions, StringComparer.Ordinal);
+            if (_mergeUnstable && !anyStableSelected)
+            {
+                var additional = new List<string>();
+                foreach (var region in allowedSet.ToList())
+                {
+                    if (!_regions[region].Stable)
+                    {
+                        var group = GetGroupName(region);
+                        var alternative = _regions.FirstOrDefault(kv => GetGroupName(kv.Key) == group && kv.Value.Stable);
+                        if (!string.IsNullOrEmpty(alternative.Key))
+                        {
+                            additional.Add(alternative.Key);
+                        }
+                    }
+                }
+
+                foreach (var extra in additional)
+                {
+                    allowedSet.Add(extra);
+                }
+            }
+
+            blockedRegionKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var regionKey in _regions.Keys)
+            {
+                if (!allowedSet.Contains(regionKey))
+                {
+                    blockedRegionKeys.Add(regionKey);
+                }
+            }
+
+            foreach (var regionKey in _blockedRegions.Keys)
+            {
+                blockedRegionKeys.Add(regionKey);
+            }
+
+            return true;
+        }
+
+        private static IEnumerable<List<string>> ChunkRemoteIps(List<string> cidrs, int chunkSize)
+        {
+            for (int i = 0; i < cidrs.Count; i += chunkSize)
+            {
+                yield return cidrs.Skip(i).Take(chunkSize).ToList();
+            }
+        }
+
+        private static bool IsValidFirewallRemoteAddress(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var trimmed = value.Trim();
+            var slashIndex = trimmed.IndexOf('/');
+            if (slashIndex < 0)
+            {
+                return IPAddress.TryParse(trimmed, out _);
+            }
+
+            var ipPart = trimmed[..slashIndex];
+            var prefixPart = trimmed[(slashIndex + 1)..];
+            if (!IPAddress.TryParse(ipPart, out var ip) || ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                return false;
+            }
+
+            if (!int.TryParse(prefixPart, out var prefixLen))
+            {
+                return false;
+            }
+
+            return prefixLen >= 0 && prefixLen <= 32;
+        }
+
+        private static string ToPowerShellStringArrayLiteral(IEnumerable<string> values)
+        {
+            var escaped = values
+                .Select(v => "'" + EscapePowerShellSingleQuoted(v) + "'")
+                .ToArray();
+            return "@(" + string.Join(",", escaped) + ")";
+        }
+
+        private static string EscapePowerShellSingleQuoted(string input)
+        {
+            return (input ?? string.Empty).Replace("'", "''");
+        }
+
+        private bool RunPowerShell(string script, out string errorDetails)
+        {
+            errorDetails = string.Empty;
+            try
+            {
+                var psi = new ProcessStartInfo("powershell", $"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null)
+                {
+                    errorDetails = "Failed to start netsh process.";
+                    return false;
+                }
+
+                proc.WaitForExit();
+                var stdout = (proc.StandardOutput.ReadToEnd() ?? string.Empty).Trim();
+                var stderr = (proc.StandardError.ReadToEnd() ?? string.Empty).Trim();
+
+                if (proc.ExitCode == 0)
+                {
+                    return true;
+                }
+
+                var details = new StringBuilder();
+                details.AppendLine($"Command: powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"");
+                details.AppendLine($"Exit code: {proc.ExitCode}");
+                if (!string.IsNullOrWhiteSpace(stderr))
+                {
+                    details.AppendLine($"Error output: {stderr}");
+                }
+                if (!string.IsNullOrWhiteSpace(stdout))
+                {
+                    details.AppendLine($"Output: {stdout}");
+                }
+
+                errorDetails = details.ToString().Trim();
+                return false;
+            }
+            catch (Exception ex)
+            {
+                errorDetails = ex.Message;
+                return false;
+            }
+        }
+
+        private bool ClearManagedFirewallRules(out string error)
+        {
+            error = null;
+            var namePrefix = EscapePowerShellSingleQuoted("Make Your Choice - DbD - ");
+            var clearScript =
+                "$rules = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like '" +
+                namePrefix +
+                "*' }; " +
+                "if ($rules) { $rules | Remove-NetFirewallRule -ErrorAction Stop }";
+
+            if (!RunPowerShell(clearScript, out var errorDetails))
+            {
+                error = string.IsNullOrWhiteSpace(errorDetails)
+                    ? "Failed to clear managed firewall rules."
+                    : $"Failed to clear managed firewall rules.\n\n{errorDetails}";
+                return false;
+            }
+
+            _firewallBlockedRegionKeys = new HashSet<string>(StringComparer.Ordinal);
+            return true;
+        }
+
+        private bool ApplyFirewallRules(HashSet<string> blockedRegionKeys, bool forceAwsRefresh, out string error)
+        {
+            error = null;
+
+            if (forceAwsRefresh)
+            {
+                _awsService.RefreshRangesPeriodicallyAsync().GetAwaiter().GetResult();
+            }
+
+            if (!ClearManagedFirewallRules(out var clearError))
+            {
+                error = clearError;
+                return false;
+            }
+
+            int addedRuleCount = 0;
+            foreach (var regionKey in blockedRegionKeys.OrderBy(k => k, StringComparer.Ordinal))
+            {
+                var regionCode = GetAwsRegionCodeForDisplayRegion(regionKey);
+                if (string.IsNullOrWhiteSpace(regionCode))
+                {
+                    continue;
+                }
+
+                var cidrs = _awsService.GetCidrsForRegionCodeAsync(regionCode)
+                    .GetAwaiter()
+                    .GetResult()
+                    .Where(IsValidFirewallRemoteAddress)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (cidrs.Count == 0)
+                {
+                    continue;
+                }
+
+                int chunkIndex = 1;
+                foreach (var cidrChunk in ChunkRemoteIps(cidrs, FirewallRemoteIpChunkSize))
+                {
+                    var safeRegionName = regionKey.Replace("\"", "");
+                    var ruleName = $"Make Your Choice - DbD - {safeRegionName} ({chunkIndex})";
+                    var remoteIpArrayLiteral = ToPowerShellStringArrayLiteral(cidrChunk);
+
+                    var escapedRuleName = EscapePowerShellSingleQuoted(ruleName);
+                    var escapedGroup = EscapePowerShellSingleQuoted(FirewallRuleGroup);
+                    var escapedDescription = EscapePowerShellSingleQuoted(FirewallRuleDescription);
+                    var escapedPorts = EscapePowerShellSingleQuoted(MatchmakingPortRange);
+
+                    var addScript =
+                        "New-NetFirewallRule " +
+                        "-DisplayName '" + escapedRuleName + "' " +
+                        "-Direction Outbound " +
+                        "-Action Block " +
+                        "-Enabled True " +
+                        "-Profile Any " +
+                        "-Protocol UDP " +
+                        "-RemotePort '" + escapedPorts + "' " +
+                        "-RemoteAddress " + remoteIpArrayLiteral + " " +
+                        "-Group '" + escapedGroup + "' " +
+                        "-Description '" + escapedDescription + "'";
+
+                    if (!RunPowerShell(addScript, out var errorDetails))
+                    {
+                        error = string.IsNullOrWhiteSpace(errorDetails)
+                            ? "Failed to add firewall rules."
+                            : $"Failed to add firewall rule for {regionKey}.\n\n{errorDetails}";
+                        return false;
+                    }
+
+                    addedRuleCount++;
+                    chunkIndex++;
+                }
+            }
+
+            if (addedRuleCount == 0)
+            {
+                error = "No AWS IP ranges were found for the regions that should be blocked.";
+                return false;
+            }
+
+            _firewallBlockedRegionKeys = new HashSet<string>(blockedRegionKeys, StringComparer.Ordinal);
+            return true;
+        }
+
+        private bool TryRefreshFirewallRules(bool forceAwsRefresh, bool showErrors)
+        {
+            if (_applyMode != ApplyMode.Firewall)
+            {
+                return true;
+            }
+
+            var blockedRegionKeys = _firewallBlockedRegionKeys.Count > 0
+                ? new HashSet<string>(_firewallBlockedRegionKeys, StringComparer.Ordinal)
+                : null;
+
+            if (blockedRegionKeys == null)
+            {
+                if (!BuildFirewallBlockedRegionSetFromSelection(out blockedRegionKeys, out var buildError))
+                {
+                    if (showErrors)
+                    {
+                        ShowFirewallErrorDialog("Firewall", buildError);
+                    }
+                    return false;
+                }
+            }
+
+            if (!ApplyFirewallRules(blockedRegionKeys, forceAwsRefresh, out var applyError))
+            {
+                if (showErrors)
+                {
+                    ShowFirewallErrorDialog("Firewall", applyError);
+                }
+                return false;
+            }
+
+            return true;
+        }
+
+        private void ShowFirewallErrorDialog(string title, string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                MessageBox.Show("Unknown firewall error.", title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var splitIndex = message.IndexOf("\n\n", StringComparison.Ordinal);
+            if (splitIndex < 0)
+            {
+                MessageBox.Show(message, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var summary = message[..splitIndex].Trim();
+            var details = message[(splitIndex + 2)..].Trim();
+            if (string.IsNullOrWhiteSpace(details))
+            {
+                MessageBox.Show(summary, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using var dialog = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false,
+                MinimizeBox = false,
+                ShowInTaskbar = false,
+                ClientSize = new Size(680, 160),
+                Padding = new Padding(12)
+            };
+
+            var lblSummary = new Label
+            {
+                Text = summary,
+                AutoSize = true,
+                MaximumSize = new Size(650, 0),
+                Location = new Point(12, 12)
+            };
+
+            var collapsedHeight = Math.Max(130, Math.Min(220, lblSummary.PreferredHeight + 95));
+            dialog.ClientSize = new Size(680, collapsedHeight);
+
+            var detailsBox = new TextBox
+            {
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Both,
+                WordWrap = false,
+                Visible = false,
+                Font = new Font(FontFamily.GenericMonospace, 8.5f),
+                Size = new Size(650, 220),
+                Location = new Point(12, 56),
+                Text = details
+            };
+
+            var btnDetails = new Button
+            {
+                Text = "Show details",
+                AutoSize = true
+            };
+            var btnOk = new Button
+            {
+                Text = "OK",
+                DialogResult = DialogResult.OK,
+                AutoSize = true
+            };
+
+            var buttonPanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.RightToLeft,
+                Dock = DockStyle.Bottom,
+                AutoSize = true,
+                Padding = new Padding(0, 10, 0, 0)
+            };
+            buttonPanel.Controls.Add(btnOk);
+            buttonPanel.Controls.Add(btnDetails);
+
+            bool showingDetails = false;
+            btnDetails.Click += (_, __) =>
+            {
+                showingDetails = !showingDetails;
+                detailsBox.Visible = showingDetails;
+                btnDetails.Text = showingDetails ? "Hide details" : "Show details";
+                dialog.ClientSize = showingDetails ? new Size(680, 340) : new Size(680, collapsedHeight);
+            };
+
+            dialog.Controls.Add(lblSummary);
+            dialog.Controls.Add(detailsBox);
+            dialog.Controls.Add(buttonPanel);
+            dialog.AcceptButton = btnOk;
+
+            ApplyDarkThemeRefinements(dialog);
+            dialog.ShowDialog(this);
+        }
+
         private HashSet<string> GetBlockedHostnamesFromHostsSection()
         {
             var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1793,7 +2303,32 @@ namespace MakeYourChoice
 
         private void BtnApply_Click(object sender, EventArgs e)
         {
-            // Check for conflicting entries before proceeding
+            if (_applyMode == ApplyMode.Firewall)
+            {
+                if (!BuildFirewallBlockedRegionSetFromSelection(out var blockedRegionKeys, out var buildError))
+                {
+                    ShowFirewallErrorDialog("Firewall", buildError);
+                    return;
+                }
+
+                if (!ApplyFirewallRules(blockedRegionKeys, forceAwsRefresh: false, out var firewallError))
+                {
+                    ShowFirewallErrorDialog("Firewall", firewallError);
+                    return;
+                }
+
+                // Clear hosts overrides so latency checks and DNS are unaffected by hosts blocking.
+                WriteWrappedHostsSection(string.Empty);
+
+                MessageBox.Show(
+                    "Firewall rules were updated successfully (Firewall mode).\n\nDead by Daylight connections to blocked regions will now be blocked by Windows Firewall.",
+                    "Success",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            // Check for conflicting hosts entries before hosts-based methods
             var conflicts = DetectConflictingEntries();
             if (conflicts.Count > 0)
             {
@@ -2076,6 +2611,7 @@ namespace MakeYourChoice
         {
             try
             {
+                _ = ClearManagedFirewallRules(out _);
                 File.Copy(HostsPath, HostsPath + ".bak", true);
                 WriteWrappedHostsSection(string.Empty);
                 try
@@ -2299,7 +2835,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 7,
+                RowCount = 8,
                 Padding = new Padding(0)
             };
 
@@ -2326,8 +2862,13 @@ namespace MakeYourChoice
                 Width = 320,
                 Margin = new Padding(3, 3, 3, 10)
             };
-            cbApplyMode.Items.AddRange(new[] { "Gatekeep (default)", "Universal Redirect (deprecated)" });
-            cbApplyMode.SelectedIndex = _applyMode == ApplyMode.UniversalRedirect ? 1 : 0;
+            cbApplyMode.Items.AddRange(new[] { "Gatekeep (default)", "Firewall", "Universal Redirect (deprecated)" });
+            cbApplyMode.SelectedIndex = _applyMode switch
+            {
+                ApplyMode.Firewall => 1,
+                ApplyMode.UniversalRedirect => 2,
+                _ => 0
+            };
             
             var lblModeNotice = new Label
             {
@@ -2379,6 +2920,72 @@ namespace MakeYourChoice
             tlpBlock.Controls.Add(rbService, 0, 2);
             tlpBlock.Controls.Add(cbMergeUnstable, 0, 3);
             blockPanel.Controls.Add(tlpBlock);
+
+            // ── Firewall Options ──────────────────────────────────────
+            var firewallPanel = new GroupBox
+            {
+                Text = "Firewall Options",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10),
+                Dock = DockStyle.Fill
+            };
+            var tlpFirewall = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 2
+            };
+            var btnRefreshFirewall = new Button
+            {
+                Text = "Refresh Firewall Rules",
+                AutoSize = true,
+                Margin = new Padding(3, 3, 3, 6)
+            };
+            var lblFirewallInfo = new Label
+            {
+                Text = "Firewall rules are automatically refreshed every time AWS ranges are fetched. The button above is simply there to force a refresh.",
+                AutoSize = true,
+                MaximumSize = new Size(320, 0),
+                Margin = new Padding(3, 0, 3, 0)
+            };
+            btnRefreshFirewall.Click += (_, __) =>
+            {
+                if (cbApplyMode.SelectedIndex != 1)
+                {
+                    MessageBox.Show(
+                        "Switch to Firewall method first.",
+                        "Firewall",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                if (_applyMode != ApplyMode.Firewall)
+                {
+                    MessageBox.Show(
+                        "Apply Program Settings first, then use Refresh Firewall Rules.",
+                        "Firewall",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                if (TryRefreshFirewallRules(forceAwsRefresh: true, showErrors: true))
+                {
+                    MessageBox.Show(
+                        "Firewall rules were refreshed successfully.",
+                        "Firewall",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+            };
+
+            tlpFirewall.Controls.Add(btnRefreshFirewall, 0, 0);
+            tlpFirewall.Controls.Add(lblFirewallInfo, 0, 1);
+            firewallPanel.Controls.Add(tlpFirewall);
 
             // ── Connectivity ──────────────────────────────────────────
             var connectivityPanel = new GroupBox
@@ -2469,9 +3076,34 @@ namespace MakeYourChoice
             cbApplyMode.SelectedIndexChanged += (s, e) =>
             {
                 bool isGatekeep = cbApplyMode.SelectedIndex == 0;
+                bool isFirewall = cbApplyMode.SelectedIndex == 1;
+
+                if (isFirewall)
+                {
+                    var result = MessageBox.Show(
+                        "Make Your Choice needs to stay active in the background when using this method in order to keep firewall rules up to date. Are you sure you want to use this method?",
+                        "Firewall Method",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning,
+                        MessageBoxDefaultButton.Button2);
+
+                    if (result != DialogResult.Yes)
+                    {
+                        cbApplyMode.SelectedIndex = _applyMode switch
+                        {
+                            ApplyMode.Firewall => 1,
+                            ApplyMode.UniversalRedirect => 2,
+                            _ => 0
+                        };
+                        return;
+                    }
+                }
+
                 blockPanel.Enabled = isGatekeep;
+                firewallPanel.Enabled = isFirewall;
             };
             blockPanel.Enabled = (cbApplyMode.SelectedIndex == 0);
+            firewallPanel.Enabled = (cbApplyMode.SelectedIndex == 1);
 
 
             // Confirm before disabling merge option
@@ -2635,11 +3267,12 @@ namespace MakeYourChoice
 
             tlpMain.Controls.Add(modePanel, 0, 0);
             tlpMain.Controls.Add(blockPanel, 0, 1);
-            tlpMain.Controls.Add(connectivityPanel, 0, 2);
-            tlpMain.Controls.Add(experimentalPanel, 0, 3);
-            tlpMain.Controls.Add(gamePanel, 0, 4);
-            tlpMain.Controls.Add(lblTipSettings, 0, 5);
-            tlpMain.Controls.Add(buttonPanel, 0, 6);
+            tlpMain.Controls.Add(firewallPanel, 0, 2);
+            tlpMain.Controls.Add(connectivityPanel, 0, 3);
+            tlpMain.Controls.Add(experimentalPanel, 0, 4);
+            tlpMain.Controls.Add(gamePanel, 0, 5);
+            tlpMain.Controls.Add(lblTipSettings, 0, 6);
+            tlpMain.Controls.Add(buttonPanel, 0, 7);
 
             dialog.Controls.Add(tlpMain);
             dialog.AcceptButton = btnOk;
@@ -2664,7 +3297,13 @@ namespace MakeYourChoice
                 }
 
                 bool darkModeChanged = _darkMode != cbDarkMode.Checked;
-                _applyMode = cbApplyMode.SelectedIndex == 1 ? ApplyMode.UniversalRedirect : ApplyMode.Gatekeep;
+                var previousApplyMode = _applyMode;
+                _applyMode = cbApplyMode.SelectedIndex switch
+                {
+                    1 => ApplyMode.Firewall,
+                    2 => ApplyMode.UniversalRedirect,
+                    _ => ApplyMode.Gatekeep,
+                };
                 if (_applyMode == ApplyMode.Gatekeep)
                 {
                     if (rbBoth.Checked)       _blockMode = BlockMode.Both;
@@ -2675,10 +3314,27 @@ namespace MakeYourChoice
                 _awsFetchIntervalMinutes = AwsFetchIntervalOptionsMinutes[trackFetchAws.Value];
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
+
+                if (previousApplyMode == ApplyMode.Firewall && _applyMode != ApplyMode.Firewall)
+                {
+                    if (!ClearManagedFirewallRules(out var clearError))
+                    {
+                        ShowFirewallErrorDialog(
+                            "Firewall",
+                            $"Failed to clear managed firewall rules.\n\n{clearError}");
+                    }
+                }
+
+                if (_applyMode == ApplyMode.Firewall)
+                {
+                    _ = TryRefreshFirewallRules(forceAwsRefresh: true, showErrors: true);
+                }
+
                 StartAwsRangesRefreshLoop();
                 SaveSettings();
                 ApplyTheme();
                 UpdateRegionListViewAppearance();
+                UpdateRevertButtonState();
                 
                 if (darkModeChanged)
                 {
