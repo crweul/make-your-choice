@@ -3,6 +3,9 @@
 > You are currently on the new repository, no action is required.  
 > ↳ [Visit the old repository](https://codeberg.org/ky/make-your-choice).
 
+> [!IMPORTANT]
+> Make Your Choice does <u>**NOT**</u> work reliably with an active VPN connection, or any other tools / services that may be altering the network.
+
 [![GitHub Downloads](https://img.shields.io/github/downloads/crweul/make-your-choice/total?style=for-the-badge&color=6e5494&logo=github&logoColor=f5f5f5&label=downloads+(precompiled))](https://github.com/crweul/make-your-choice/releases)
 [![Codeberg Downloads](https://img.shields.io/badge/dynamic/json?style=for-the-badge&logo=codeberg&logoColor=f5f5f5&label=downloads+(1.0.0+RC)&query=$.assets[0].download_count&url=https://codeberg.org/api/v1/repos/ky/make-your-choice/releases/tags/1.0.0-RC)](https://codeberg.org/ky/make-your-choice/releases/tag/1.0.0-RC)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/crweul/make-your-choice/build.yml?style=for-the-badge&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAD20lEQVRYR7WXaYiOURTHvfliGJNCmpAlNdb4YAljkiyNpUHJ+oFIItuIL8QYDI1dGSkU2Uuyjd1EBllTCmMb0hAzaYw1H16//3TvdOf1vu/zPK+ZU6fnLv9zzv+5z3PPPTfUwKeEw+FGQMeg49HOaAuj8lBu9CnPE+i5UCj0y4/rkBeIwK3ArEWnokleeDP/g+cBdCVEPseziUuA4LkYL0X19omIiKyHhF4gqkQlQODmoM+g/SOsntA/hV5F36MfzHwqzzboMDQL7RphV0R/HEQqI1n8Q4DgXQCdR9s54Ae0F+Dglp9lwMdgcDvQHg7+Be2h+Hjn+qhFAEO9xR20tQOah1GBn8CRGPwtZmxLBIl++Ptix2oIAE5h8KbDWss7BrDePmHB7yCMT6L6rJLb6BC7S1wCO5mYa0C/eQ4A9DDhyI4hJDLoXkMbmuHV+M5Ru5oAgI48Xjk20wHsr4vg1gcxltDeZPrfeHYgRrklcJiByWaymIn0ugzukFCiUhKTbCVOdghmTel8dQKmM1EciwD4bOaOgikLShJbZVFlSkkFPlqIwCQ6R8zgYwZ7xXMMPsz8dzQP3Qj+j18imGrFP6FK45IMEThEY4oZyMXhKh8ELOQ1DeWHcwFI7AE70+DzReAend5mYKBXsjErEBnvAgPKFyIUV7CfAOC4ARWKQCkdm/Xa4+RtgBVwofoU21BtMX2iqEI8feJHZvKJCAjc2AwkeR2jMVbADabTb2yslcS+GfM2E1aKgHaAdoIkOR57AXwS0METdSdhn4ybKhOvSgR0SHQyA2kYlvzHJ9iObY7HJ1AeUD6QlIjADRrK15LhGF9OgMBFbOZjq5eJK8TLBFBoQEUisJvObDOgfb0sAAEdrQp82iuwnSeejun5pl8gAqrzrIMSnKX5IGAT0WbwOrh8C/GUQVXASDJFQOVWBWp3go5KVTBRBbzO+GMJpuJR2J41jqvwkWIPo30MzjAT95no4/uVAgAhr5KumzHZRZy5loASUanjaxaTewP49oQSfBGgrQ4wlRgf3YJEWWyhAdR3QZJH8OWK5RJQglBJ1tOQqK+S7C7+B0PgZy0C6rBM+jsFUHFqZQ5gbdXAgj/dKfIdwze0++JPN6lqiVaWK1NdQts6hvdp69hVQekpBNb9QNVwdwf8nHYmPkSiRmJdTFqC0BkfuRt0imkbXUHLcPaSYDpHtHIiPAIdido/3Qa6TiMLvPfFxGWH8zX0V3i+cmyAis91BN4QC+LncqpLihxMC0BEmfKgyLvfO5q9JwFrxGo0oT0anYiqjNdFQ7WdakR7PX9GWwWr77PhL8wGiLa1JMgJAAAAEGRlQkdDNzZFNENGNTAxMTcwQTFCfZSh2AAAAABJRU5ErkJggg==)](https://github.com/crweul/make-your-choice/actions)
@@ -13,6 +16,28 @@
 Make Your Choice is a server region changer for Dead by Daylight. It allows you to play on any server of choice.
 
 <img src="https://i.imgur.com/oJetRV7.png" alt="Main">
+
+# Table of Contents
+- [Make Your Choice](#make-your-choice)
+- [Installation: Windows](#installation-windows)
+  - [Installation](#installation)
+  - [Supported Windows Versions](#supported-windows-versions)
+  - [UAC Popup & SmartScreen Alert](#uac-popup--smartscreen-alert)
+- [Installation: Linux / SteamOS](#installation-linux--steamos)
+  - [Method 1: Package Manager](#method-1-package-manager)
+    - [Arch](#arch)
+  - [Method 2: Build & Install From Source (Makefile)](#method-2-build--install-from-source-makefile)
+    - [Prerequisites](#prerequisites)
+      - [Arch](#arch-1)
+      - [Debian / Ubuntu / ZorinOS](#debian--ubuntu--zorinos)
+      - [Fedora](#fedora)
+      - [openSUSE](#opensuse)
+    - [Build & Install](#build--install)
+  - [Method 3: Precompiled Binary](#method-3-precompiled-binary)
+- [Screenshots](#screenshots)
+  - [Windows](#windows)
+  - [Linux](#linux)
+- [Frequently Asked Questions](#faq)
 
 # Installation: Windows
 ## Installation
@@ -91,3 +116,20 @@ This option is recommended if you have a SteamOS device.
 ## Linux
 <img src="https://i.imgur.com/VlHsxtc.png" alt="Main" height="450"> <img src="https://i.imgur.com/BXZuWkL.png" alt="Main" height="450"> <img src="https://i.imgur.com/xtvswcf.png" alt="Main" height="450">  
 *Screenshots taken on Arch Linux with the KDE Plasma Desktop Environment.*
+
+# FAQ
+<details>
+  <summary><b>Does Make Your Choice work on Steam Deck?</b></summary>
+  Yes! Simply download and run the Linux binary from the <a href="https://github.com/crweul/make-your-choice/releases/latest">Releases</a> page.
+  <br>
+</details>
+<details>
+  <summary><b>Does Make Your Choice need to remain open in the background for it to work?</b></summary>
+  No. Once your selections are applied, MYC will remain functional even if you close the application.
+  <br>
+</details>
+<details>
+  <summary><b>Does Make Your Choice work in my region?</b></summary>
+  MYC is mostly incompatible with VPNs. If you live in a country with restricted internet access and rely on a VPN to get online, the program may not function correctly.
+  <br>
+</details>
