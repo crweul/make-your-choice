@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -12,13 +13,12 @@ namespace MakeYourChoice
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr handle);
 
-        // Two tray indicators (sourced from Dead by Queue):
-        //   _trayServer = is your preferred server online?  (green dot = online, red = offline)
-        //   _trayQueue  = current killer queue time          (minutes drawn as the icon)
-        private NotifyIcon _trayServer;
-        private NotifyIcon _trayQueue;
-        private IntPtr _trayServerHandle = IntPtr.Zero;
-        private IntPtr _trayQueueHandle = IntPtr.Zero;
+        // A single tray icon: the app icon with a status bubble in the bottom-right corner
+        // (green = preferred server online, red = offline, gray = unknown). The tooltip shows the
+        // server status and the current killer/survivor queue time, sourced from Dead by Queue.
+        private NotifyIcon _tray;
+        private IntPtr _trayHandle = IntPtr.Zero;
+        private Bitmap _appIconBmp;
         private ContextMenuStrip _trayMenu;
         private Timer _dbqTimer;
         private bool _minimizeBalloonShown;
@@ -30,31 +30,24 @@ namespace MakeYourChoice
 
         private void SetupTray()
         {
-            if (_trayServer != null) return; // already set up
+            if (_tray != null) return; // already set up
+
+            _appIconBmp = LoadAppIconBitmap();
 
             _trayMenu = new ContextMenuStrip();
             _trayMenu.Items.Add("Show Make Your Choice", null, (_, __) => RestoreFromTray());
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add("Exit", null, (_, __) => ExitFromTray());
 
-            _trayServer = new NotifyIcon
+            _tray = new NotifyIcon
             {
-                Text = "Preferred server: waiting…",
+                Text = "Make Your Choice — waiting for server status…",
                 Visible = true,
                 ContextMenuStrip = _trayMenu,
             };
-            _trayServer.DoubleClick += (_, __) => RestoreFromTray();
+            _tray.DoubleClick += (_, __) => RestoreFromTray();
 
-            _trayQueue = new NotifyIcon
-            {
-                Text = "Killer queue: waiting…",
-                Visible = true,
-                ContextMenuStrip = _trayMenu,
-            };
-            _trayQueue.DoubleClick += (_, __) => RestoreFromTray();
-
-            SetTrayIcon(_trayServer, ref _trayServerHandle, MakeDotIcon(Color.Gray));
-            SetTrayIcon(_trayQueue, ref _trayQueueHandle, MakeNumberIcon("…"));
+            SetTrayIcon(MakeStatusIcon(Color.Gray));
         }
 
         private void StartDbqTimer()
@@ -67,7 +60,7 @@ namespace MakeYourChoice
 
         private async System.Threading.Tasks.Task RefreshDbqAsync()
         {
-            if (_exiting || IsDisposed) return;
+            if (_exiting || IsDisposed || _tray == null) return;
 
             // 1) Region online/offline map (also drives the latency list ✓/⚠).
             var status = await DbqClient.GetRegionStatusAsync();
@@ -77,14 +70,12 @@ namespace MakeYourChoice
                 foreach (var kv in status) _dbqOnline[kv.Key] = kv.Value;
             }
 
-            // 2) Preferred server status + its queue time.
+            // 2) Preferred server status + its queue time, shown on the single tray icon.
             var preferred = GetPreferredRegionKey();
             if (preferred == null)
             {
-                if (_trayServer != null) _trayServer.Text = "Preferred server: select a region";
-                SetTrayIcon(_trayServer, ref _trayServerHandle, MakeDotIcon(Color.Gray));
-                if (_trayQueue != null) _trayQueue.Text = "Killer queue: select a region";
-                SetTrayIcon(_trayQueue, ref _trayQueueHandle, MakeNumberIcon("–"));
+                SetTrayIcon(MakeStatusIcon(Color.Gray));
+                _tray.Text = Trunc("Make Your Choice — select a region to track");
                 return;
             }
 
@@ -95,15 +86,13 @@ namespace MakeYourChoice
                 ? preferred.Substring(preferred.IndexOf('(') + 1).TrimEnd(')')
                 : preferred;
 
-            Color dot = online == true ? Color.LimeGreen : online == false ? Color.Red : Color.Gray;
-            string state = online == true ? "ONLINE" : online == false ? "OFFLINE" : "unknown";
-            SetTrayIcon(_trayServer, ref _trayServerHandle, MakeDotIcon(dot));
-            if (_trayServer != null) _trayServer.Text = Trunc($"{shortName}: {state}");
+            Color bubble = online == true ? Color.LimeGreen : online == false ? Color.Red : Color.Gray;
+            string state = online == true ? "ONLINE" : online == false ? "OFFLINE" : "status unknown";
+            SetTrayIcon(MakeStatusIcon(bubble));
 
-            var (queueText, minutes) = await DbqClient.GetQueueAsync(code ?? "");
-            SetTrayIcon(_trayQueue, ref _trayQueueHandle,
-                MakeNumberIcon(minutes >= 0 ? minutes.ToString() : "?"));
-            if (_trayQueue != null) _trayQueue.Text = Trunc($"{shortName} queue — {queueText}");
+            var (queueText, _) = await DbqClient.GetQueueAsync(code ?? "");
+            if (_tray != null)
+                _tray.Text = Trunc($"{shortName}: {state}  —  {queueText}");
         }
 
         // The region the tray reports on: first checked unstable region, else first checked region.
@@ -119,17 +108,17 @@ namespace MakeYourChoice
             return unstable ?? checkedKeys[0];
         }
 
-        private static string Trunc(string s) => s.Length > 120 ? s.Substring(0, 119) + "…" : s;
+        private static string Trunc(string s) => s != null && s.Length > 120 ? s.Substring(0, 119) + "…" : s;
 
-        private void SetTrayIcon(NotifyIcon ni, ref IntPtr handleStore, Bitmap bmp)
+        private void SetTrayIcon(Bitmap bmp)
         {
-            if (ni == null) { bmp.Dispose(); return; }
+            if (_tray == null) { bmp.Dispose(); return; }
             IntPtr h = bmp.GetHicon();
             try
             {
-                ni.Icon = Icon.FromHandle(h);
-                if (handleStore != IntPtr.Zero) DestroyIcon(handleStore);
-                handleStore = h;
+                _tray.Icon = Icon.FromHandle(h);
+                if (_trayHandle != IntPtr.Zero) DestroyIcon(_trayHandle);
+                _trayHandle = h;
             }
             finally
             {
@@ -137,50 +126,63 @@ namespace MakeYourChoice
             }
         }
 
-        private static Bitmap MakeDotIcon(Color color)
+        private static Bitmap LoadAppIconBitmap()
+        {
+            try
+            {
+                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico");
+                if (File.Exists(path))
+                {
+                    using var ico = new Icon(path, 32, 32);
+                    return new Bitmap(ico.ToBitmap(), 32, 32);
+                }
+            }
+            catch { /* fall through */ }
+            // Fallback: a neutral placeholder so the tray still works.
+            var bmp = new Bitmap(32, 32);
+            using var g = Graphics.FromImage(bmp);
+            g.Clear(Color.FromArgb(110, 84, 148)); // app accent purple
+            return bmp;
+        }
+
+        // App icon with a colored status bubble drawn in the bottom-right corner.
+        private Bitmap MakeStatusIcon(Color bubble)
         {
             var bmp = new Bitmap(32, 32);
             using var g = Graphics.FromImage(bmp);
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
             g.Clear(Color.Transparent);
-            using var brush = new SolidBrush(color);
-            g.FillEllipse(brush, 4, 4, 24, 24);
-            using var pen = new Pen(Color.FromArgb(120, 0, 0, 0), 2);
-            g.DrawEllipse(pen, 4, 4, 24, 24);
+
+            if (_appIconBmp != null)
+                g.DrawImage(_appIconBmp, new Rectangle(0, 0, 32, 32));
+
+            const int d = 15;
+            int x = 32 - d - 1, y = 32 - d - 1;
+            // White ring for contrast on any taskbar colour.
+            using (var ring = new SolidBrush(Color.White))
+                g.FillEllipse(ring, x - 2, y - 2, d + 4, d + 4);
+            using (var fill = new SolidBrush(bubble))
+                g.FillEllipse(fill, x, y, d, d);
+            using (var pen = new Pen(Color.FromArgb(140, 0, 0, 0), 1))
+                g.DrawEllipse(pen, x, y, d, d);
             return bmp;
         }
 
-        private static Bitmap MakeNumberIcon(string text)
-        {
-            var bmp = new Bitmap(32, 32);
-            using var g = Graphics.FromImage(bmp);
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
-            g.Clear(Color.Transparent);
-            float size = text.Length >= 3 ? 16f : 22f;
-            using var font = new Font("Segoe UI", size, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-            var rect = new RectangleF(0, 0, 32, 32);
-            using var shadow = new SolidBrush(Color.FromArgb(180, 0, 0, 0));
-            g.DrawString(text, font, shadow, new RectangleF(1, 1, 32, 32), fmt);
-            using var brush = new SolidBrush(Color.Aqua);
-            g.DrawString(text, font, brush, rect, fmt);
-            return bmp;
-        }
-
-        // Minimize-to-tray: minimizing hides the window (and its taskbar button); the tray icons remain.
+        // Minimize-to-tray: when enabled, minimizing hides the window (and its taskbar button);
+        // the tray icon remains. Otherwise it behaves like a normal taskbar minimize.
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (WindowState == FormWindowState.Minimized)
+            if (_minimizeToTray && WindowState == FormWindowState.Minimized && _tray != null)
             {
                 Hide();
-                if (!_minimizeBalloonShown && _trayServer != null)
+                if (!_minimizeBalloonShown)
                 {
                     _minimizeBalloonShown = true;
-                    _trayServer.BalloonTipTitle = "Make Your Choice";
-                    _trayServer.BalloonTipText = "Still running in the system tray. Double-click to restore.";
-                    try { _trayServer.ShowBalloonTip(2000); } catch { }
+                    _tray.BalloonTipTitle = "Make Your Choice";
+                    _tray.BalloonTipText = "Still running in the system tray. Double-click to restore.";
+                    try { _tray.ShowBalloonTip(2000); } catch { }
                 }
             }
         }
@@ -205,10 +207,9 @@ namespace MakeYourChoice
         {
             _exiting = true;
             try { _dbqTimer?.Stop(); _dbqTimer?.Dispose(); } catch { }
-            if (_trayServer != null) { _trayServer.Visible = false; _trayServer.Dispose(); }
-            if (_trayQueue != null) { _trayQueue.Visible = false; _trayQueue.Dispose(); }
-            if (_trayServerHandle != IntPtr.Zero) { DestroyIcon(_trayServerHandle); _trayServerHandle = IntPtr.Zero; }
-            if (_trayQueueHandle != IntPtr.Zero) { DestroyIcon(_trayQueueHandle); _trayQueueHandle = IntPtr.Zero; }
+            if (_tray != null) { _tray.Visible = false; _tray.Dispose(); _tray = null; }
+            if (_trayHandle != IntPtr.Zero) { DestroyIcon(_trayHandle); _trayHandle = IntPtr.Zero; }
+            _appIconBmp?.Dispose();
             _trayMenu?.Dispose();
         }
     }

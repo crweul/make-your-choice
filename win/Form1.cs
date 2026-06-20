@@ -163,6 +163,8 @@ namespace MakeYourChoice
         // plane (UDP) of every region you did NOT choose, so DBD's fallback (e.g. N. Virginia)
         // can't place you there. Makes choosing solo unstable servers more reliable.
         private bool _useHardLock = false;
+        // When minimized, hide to the system tray instead of the taskbar (default on).
+        private bool _minimizeToTray = true;
         private Label _lblConnectedToValue;
         private Label _lblConnectionDot; 
         private TrafficSniffer _sniffer;
@@ -202,6 +204,7 @@ namespace MakeYourChoice
             public string AutoUpdateCheckPausedUntil { get; set; }
             public bool DarkMode { get; set; }
             public bool UseHardRegionLock { get; set; }
+            public bool MinimizeToTray { get; set; } = true;
         }
 
         private void LoadSettings()
@@ -226,6 +229,7 @@ namespace MakeYourChoice
                     _autoUpdateCheckPausedUntil = settings.AutoUpdateCheckPausedUntil;
                     _darkMode = settings.DarkMode;
                     _useHardLock = settings.UseHardRegionLock;
+                    _minimizeToTray = settings.MinimizeToTray;
                 }
             }
             catch
@@ -254,6 +258,7 @@ namespace MakeYourChoice
                     AutoUpdateCheckPausedUntil = _autoUpdateCheckPausedUntil,
                     DarkMode = _darkMode,
                     UseHardRegionLock = _useHardLock,
+                    MinimizeToTray = _minimizeToTray,
                 };
                 var serializer = new SerializerBuilder().Build();
                 var yaml = serializer.Serialize(settings);
@@ -2368,7 +2373,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 6
+                RowCount = 5
             };
 
             var rbBoth = new RadioButton { Text = "Block both (default)", AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
@@ -2392,25 +2397,16 @@ namespace MakeYourChoice
                 AutoSize = true,
                 Checked = _useHardLock,
                 MaximumSize = new Size(320, 0),
-                Margin = new Padding(3, 8, 3, 0)
+                Margin = new Padding(3, 8, 3, 3)
             };
             var toolTipHardLock = new ToolTip();
-            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable");
-            var lblHardLockDesc = new Label
-            {
-                Text = "Makes choosing solo unstable servers more reliable",
-                AutoSize = true,
-                ForeColor = _darkMode ? Color.DarkGray : Color.DimGray,
-                MaximumSize = new Size(320, 0),
-                Margin = new Padding(22, 0, 3, 6)
-            };
+            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline");
 
             tlpBlock.Controls.Add(rbBoth, 0, 0);
             tlpBlock.Controls.Add(rbPing, 0, 1);
             tlpBlock.Controls.Add(rbService, 0, 2);
             tlpBlock.Controls.Add(cbMergeUnstable, 0, 3);
             tlpBlock.Controls.Add(cbHardLock, 0, 4);
-            tlpBlock.Controls.Add(lblHardLockDesc, 0, 5);
             blockPanel.Controls.Add(tlpBlock);
 
             // Initialize selections
@@ -2462,7 +2458,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 1
+                RowCount = 2
             };
             var cbDarkMode = new CheckBox
             {
@@ -2471,7 +2467,17 @@ namespace MakeYourChoice
                 Checked = _darkMode,
                 Margin = new Padding(3, 5, 3, 3)
             };
+            var cbMinimizeTray = new CheckBox
+            {
+                Text = "Minimize to system tray",
+                AutoSize = true,
+                Checked = _minimizeToTray,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipTray = new ToolTip();
+            toolTipTray.SetToolTip(cbMinimizeTray, "When minimized, hide to the system tray instead of the taskbar. The tray icon shows your preferred server's online status.");
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
+            tlpExperimental.Controls.Add(cbMinimizeTray, 0, 1);
             experimentalPanel.Controls.Add(tlpExperimental);
 
             // ── Game folder ────────────────────────────────────────────
@@ -2581,6 +2587,7 @@ namespace MakeYourChoice
                 cbHardLock.Checked = false;
                 tbGamePath.Text = string.Empty;
                 cbDarkMode.Checked = false;
+                cbMinimizeTray.Checked = true;
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
@@ -2632,6 +2639,7 @@ namespace MakeYourChoice
                     FirewallManager.RemoveLock();
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
+                _minimizeToTray = cbMinimizeTray.Checked;
                 SaveSettings();
                 ApplyTheme();
                 UpdateRegionListViewAppearance();

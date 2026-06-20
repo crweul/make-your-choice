@@ -37,12 +37,11 @@ The **Use hard region lock (firewall) to force exclude unchosen servers** option
 It's two-way: pick your region (e.g. Ohio) and click **Apply Selection** with the toggle on to lock; turning the toggle off removes the rules. (Makes choosing solo unstable servers more reliable.) Requires running as administrator. The rules persist across reboots and are *not* cleared by “Reset hosts file”.
 
 ## Live server status & system tray (Windows)
-Real online/offline status for the unstable servers comes from the public [Dead by Queue](https://www.deadbyqueue.com) API (`/regions`), shown as ✓ (online) / ⚠ (offline) next to those servers in the list. The app also adds two **system-tray indicators**:
+Real online/offline status for the unstable servers comes from the public [Dead by Queue](https://www.deadbyqueue.com) API (`/regions`), shown as ✓ (online) / ⚠ (offline) next to those servers in the list.
 
-- **Preferred server** — a green/red dot showing whether your chosen server is currently online.
-- **Killer queue** — the current killer queue time (minutes) for that server, from Dead by Queue.
+A single **system-tray icon** (the app icon with a coloured status bubble in its corner) tracks your preferred server: **green** = online, **red** = offline, **grey** = unknown. Hover it for the server status and the current killer/survivor queue time (from Dead by Queue).
 
-Minimizing the window now sends it to the **system tray** instead of the taskbar; double-click either tray icon (or right-click → *Show*) to restore.
+By default, minimizing the window sends it to the **system tray** instead of the taskbar — toggle this with **Minimize to system tray** in Program settings. Double-click the tray icon (or right-click → *Show*) to restore.
 
 # Installation: Linux / SteamOS
 > [!NOTE]
