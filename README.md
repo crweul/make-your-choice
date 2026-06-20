@@ -78,20 +78,21 @@ This method can be used to build and install the program straight from source us
 Install the prerequisite packages in order to build, install and run the program. If your distro isn't listed below, find out the correct package names for your distro's package manager.
 #### Arch
 ```bash
-sudo pacman -S rust gtk4 polkit base-devel git
+sudo pacman -S rust gtk4 polkit base-devel git dbus nftables
 ```
 #### Debian / Ubuntu / ZorinOS
 ```bash
-sudo apt install cargo rustc make gcc pkg-config libgtk-4-dev git policykit-1
+sudo apt install cargo rustc make gcc pkg-config libgtk-4-dev libdbus-1-dev git policykit-1 nftables
 ```
 #### Fedora
 ```bash
-sudo dnf install cargo rust make gcc pkg-config gtk4-devel git polkit
+sudo dnf install cargo rust make gcc pkg-config gtk4-devel dbus-devel git polkit nftables
 ```
 #### openSUSE
 ```bash
-sudo zypper install cargo rust make gcc pkg-config gtk4-devel git polkit
+sudo zypper install cargo rust make gcc pkg-config gtk4-devel dbus-1-devel git polkit nftables
 ```
+> `dbus`/`libdbus-1-dev` is required to build the system-tray support; `nftables` is required at runtime for the hard region lock.
 
 ### Build & Install
 Clone and install using Makefile:
