@@ -15,18 +15,36 @@ namespace MakeYourChoice
 
         private readonly struct AwsCidr
         {
-            public AwsCidr(uint network, uint mask, int prefixLength, string region)
+            public AwsCidr(uint network, uint mask, int prefixLength, string region, string prefix)
             {
                 Network = network;
                 Mask = mask;
                 PrefixLength = prefixLength;
                 Region = region;
+                Prefix = prefix;
             }
 
             public uint Network { get; }
             public uint Mask { get; }
             public int PrefixLength { get; }
             public string Region { get; }
+            public string Prefix { get; }
+        }
+
+        /// <summary>
+        /// Returns the set of CIDR strings (e.g. "3.5.0.0/16") belonging to the given AWS region
+        /// codes (e.g. "us-east-1"). Used to firewall-block a region's game-server data plane.
+        /// </summary>
+        public async Task<List<string>> GetCidrStringsForRegionsAsync(ISet<string> regionCodes)
+        {
+            await RefreshRangesAsync().ConfigureAwait(false);
+            var set = new HashSet<string>();
+            foreach (var c in _cidrs)
+            {
+                if (c.Region != null && c.Prefix != null && regionCodes.Contains(c.Region))
+                    set.Add(c.Prefix);
+            }
+            return new List<string>(set);
         }
 
         private async Task<List<AwsCidr>> FetchRangesAsync()
@@ -59,7 +77,7 @@ namespace MakeYourChoice
 
                         if (TryParseIpv4Cidr(ipPrefix, out var network, out var mask, out var prefixLength))
                         {
-                            list.Add(new AwsCidr(network, mask, prefixLength, region));
+                            list.Add(new AwsCidr(network, mask, prefixLength, region, ipPrefix));
                         }
                     }
                 }

@@ -159,6 +159,9 @@ namespace MakeYourChoice
         private bool _mergeUnstable = true;
         private string _gamePath;
         private bool _darkMode = false;
+        // Regions whose game-server data plane is hard-blocked via the firewall. Persisted so the
+        // Hard Region Lock dialog repopulates the actual selection instead of resetting each time.
+        private HashSet<string> _hardLockBlocked = new();
         private Label _lblConnectedToValue;
         private Label _lblConnectionDot; 
         private TrafficSniffer _sniffer;
@@ -197,6 +200,7 @@ namespace MakeYourChoice
             public string GamePath { get; set; }
             public string AutoUpdateCheckPausedUntil { get; set; }
             public bool DarkMode { get; set; }
+            public List<string> HardLockBlockedRegions { get; set; }
         }
 
         private void LoadSettings()
@@ -220,6 +224,9 @@ namespace MakeYourChoice
                     _gamePath = settings.GamePath;
                     _autoUpdateCheckPausedUntil = settings.AutoUpdateCheckPausedUntil;
                     _darkMode = settings.DarkMode;
+                    _hardLockBlocked = settings.HardLockBlockedRegions != null
+                        ? new HashSet<string>(settings.HardLockBlockedRegions)
+                        : new HashSet<string>();
                 }
             }
             catch
@@ -247,6 +254,7 @@ namespace MakeYourChoice
                     GamePath = _gamePath,
                     AutoUpdateCheckPausedUntil = _autoUpdateCheckPausedUntil,
                     DarkMode = _darkMode,
+                    HardLockBlockedRegions = _hardLockBlocked.ToList(),
                 };
                 var serializer = new SerializerBuilder().Build();
                 var yaml = serializer.Serialize(settings);
@@ -256,6 +264,136 @@ namespace MakeYourChoice
             {
                 // ignore save errors
             }
+        }
+
+        // Extract the AWS region code (e.g. "us-east-2") from a GameLift hostname such as
+        // "gamelift.us-east-2.amazonaws.com" or "gamelift-ping.us-east-2.api.aws".
+        private static string AwsCodeFromHost(string host)
+        {
+            if (string.IsNullOrEmpty(host)) return null;
+            var parts = host.Split('.');
+            return parts.Length > 1 ? parts[1] : null;
+        }
+
+        private string AwsCodeForRegion(string regionKey)
+        {
+            if (_regions.TryGetValue(regionKey, out var info) && info.Hosts.Length > 0)
+                return AwsCodeFromHost(info.Hosts[0]);
+            return null;
+        }
+
+        private void ShowRegionLockDialog()
+        {
+            using var dlg = new Form
+            {
+                Text = "Hard Region Lock (Firewall)",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false,
+                MinimizeBox = false,
+                ClientSize = new Size(500, 470),
+                BackColor = _darkMode ? Color.FromArgb(32, 34, 37) : SystemColors.Control,
+                ForeColor = _darkMode ? Color.White : Color.Black,
+            };
+
+            var intro = new Label
+            {
+                Text = "Blocks the game-server connection (UDP) to the ticked regions so DBD can't place you " +
+                       "there. EAC and matchmaking use " +
+                       "TCP and are left alone, so the game still launches; a blocked match just fails and " +
+                       "re-queues.\n\nTick the regions to BLOCK (leave the one you want to play on unticked):",
+                AutoSize = false,
+                Location = new Point(12, 10),
+                Size = new Size(476, 84),
+            };
+
+            var clb = new CheckedListBox
+            {
+                Location = new Point(12, 100),
+                Size = new Size(476, 238),
+                CheckOnClick = true,
+                BackColor = _darkMode ? Color.FromArgb(24, 26, 28) : Color.White,
+                ForeColor = _darkMode ? Color.Gainsboro : Color.Black,
+                IntegralHeight = false,
+            };
+
+            // Repopulate from the last-applied block set; default to N. Virginia if never set.
+            var preBlocked = _hardLockBlocked.Count > 0
+                ? new HashSet<string>(_hardLockBlocked)
+                : new HashSet<string> { "US East (N. Virginia)" };
+
+            var orderedRegions = _regions.Keys.OrderBy(k => k).ToList();
+            foreach (var key in orderedRegions)
+            {
+                var code = AwsCodeForRegion(key);
+                var label = key + (code != null ? $"  [{code}]" : "");
+                clb.Items.Add(label, preBlocked.Contains(key));
+            }
+
+            void RefreshStatus(Label l)
+            {
+                bool active = FirewallManager.IsLockActive();
+                l.Text = active ? "Status: a hard lock is currently ACTIVE." : "Status: no hard lock active.";
+                l.ForeColor = active ? Color.Orange : (_darkMode ? Color.Gainsboro : Color.Black);
+            }
+
+            var lblStatus = new Label { Location = new Point(12, 344), Size = new Size(476, 18) };
+            RefreshStatus(lblStatus);
+
+            var lblWarn = new Label
+            {
+                Location = new Point(12, 364),
+                Size = new Size(476, 32),
+                Text = "Rules persist after closing and across reboots. Use “Remove lock” to undo. " +
+                       "“Reset hosts file” does NOT remove them.",
+                ForeColor = _darkMode ? Color.DarkGray : Color.DimGray,
+            };
+
+            var btnApply = new Button { Text = "Apply hard lock", Location = new Point(12, 402), Width = 150 };
+            var btnRemove = new Button { Text = "Remove lock", Location = new Point(170, 402), Width = 120 };
+            var btnClose = new Button { Text = "Close", Location = new Point(408, 402), Width = 80, DialogResult = DialogResult.Cancel };
+
+            btnApply.Click += async (_, __) =>
+            {
+                var blockRegions = new HashSet<string>();
+                for (int i = 0; i < clb.Items.Count; i++)
+                    if (clb.GetItemChecked(i)) blockRegions.Add(orderedRegions[i]);
+
+                if (blockRegions.Count == 0)
+                {
+                    MessageBox.Show("Select at least one region to block.",
+                        "Nothing selected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                var blockCodes = blockRegions.Select(AwsCodeForRegion).Where(c => c != null).ToHashSet();
+
+                btnApply.Enabled = false; btnRemove.Enabled = false;
+                lblStatus.Text = "Applying… fetching AWS IP ranges and creating firewall rules.";
+                var (ok, msg) = await FirewallManager.ApplyLockAsync(_awsService, blockCodes);
+                if (ok)
+                {
+                    _hardLockBlocked = blockRegions;
+                    SaveSettings();
+                }
+                btnApply.Enabled = true; btnRemove.Enabled = true;
+                RefreshStatus(lblStatus);
+                MessageBox.Show(msg, ok ? "Hard lock applied" : "Could not apply lock",
+                    MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            };
+
+            btnRemove.Click += (_, __) =>
+            {
+                FirewallManager.RemoveLock();
+                RefreshStatus(lblStatus);
+                MessageBox.Show("Hard lock removed (firewall rules deleted).", "Removed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+
+            dlg.Controls.AddRange(new Control[] { intro, clb, lblStatus, lblWarn, btnApply, btnRemove, btnClose });
+            dlg.CancelButton = btnClose;
+            if (_darkMode) ApplyDarkThemeRefinements(dlg);
+            dlg.ShowDialog(this);
         }
 
         private class DarkModeColorTable : ProfessionalColorTable
@@ -721,6 +859,9 @@ namespace MakeYourChoice
             var miSettings = new ToolStripMenuItem("Program settings");
             miSettings.Click += (_,__) => ShowSettingsDialog();
             mOptions.DropDownItems.Add(miSettings);
+            var miRegionLock = new ToolStripMenuItem("Hard region lock (firewall)…");
+            miRegionLock.Click += (_, __) => ShowRegionLockDialog();
+            mOptions.DropDownItems.Add(miRegionLock);
             var miCustomSplash = new ToolStripMenuItem("Custom splash art");
             miCustomSplash.Click += (_, __) => HandleCustomSplashArt();
             var miSkipTrailer = new ToolStripMenuItem("Auto-skip loading screen trailer");

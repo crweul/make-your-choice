@@ -26,6 +26,16 @@ Download the latest `.exe` file from the [Releases](https://github.com/crweul/ma
 The application needs to be run with [administrator permissions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/) to ensure the hosts file can be edited. Since I don't want to pay Microsoft a fee for getting this free application signed, you will be met with a prompt to trust the unknown developer.  
 <img src="https://i.imgur.com/zpMPDzM.png" alt="Main" height="350"> <img src="https://i.imgur.com/bu62CXd.png" alt="Main" height="350">
 
+## Hard Region Lock (Windows)
+Selecting a region edits your hosts file so the **client** stops measuring latency to the other regions, which makes DBD prefer the one you left. That's enough to *prefer* a region, but it can't stop DBD's **server-side fallback to N. Virginia** (`us-east-1`): you can't hosts-block Virginia (EAC/matchmaking/startup live there), and a match connects to a raw server IP over **UDP**, not a hostname.
+
+**Options → Hard region lock (firewall)…** closes that gap. Tick the regions to block (N. Virginia is pre-selected) and the app pulls AWS's published IP ranges to create Windows Firewall rules that block **outbound UDP 7770–7820** (the GameLift ping beacon + game-server ports) to them:
+
+- EAC / matchmaking / startup use **TCP 443**, which is never touched — the game still launches.
+- If DBD tries to drop you onto a blocked region the match **can't connect**, so it fails/re-queues instead of putting you there.
+
+Keep the region you want (e.g. Ohio) selected in the main list and apply the lock on N. Virginia. Use **Remove lock** to undo — the rules persist across reboots and are *not* cleared by “Reset hosts file”. Requires running as administrator.
+
 # Installation: Linux / SteamOS
 > [!NOTE]
 > **For SteamOS users**: There are two ways to use Make Your Choice:  
