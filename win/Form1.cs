@@ -171,6 +171,9 @@ namespace MakeYourChoice
         // without a UAC prompt each login).
         private bool _startWithWindows = false;
         private const string AutoStartTaskName = "MakeYourChoice AutoStart";
+        // Set when launched by the autostart task (--autostart): start in the tray, or minimized
+        // to the taskbar if the tray is disabled.
+        private bool _startMinimized = false;
         // Last session's ticked regions, restored on launch so the selection (and any matching
         // firewall rules) is repopulated. Updated whenever settings are saved.
         private List<string> _savedSelection = new();
@@ -309,7 +312,7 @@ namespace MakeYourChoice
                     if (string.IsNullOrEmpty(exe)) return;
                     psi.ArgumentList.Add("/create");
                     psi.ArgumentList.Add("/tn"); psi.ArgumentList.Add(AutoStartTaskName);
-                    psi.ArgumentList.Add("/tr"); psi.ArgumentList.Add("\"" + exe + "\"");
+                    psi.ArgumentList.Add("/tr"); psi.ArgumentList.Add("\"" + exe + "\" --autostart");
                     psi.ArgumentList.Add("/sc"); psi.ArgumentList.Add("onlogon");
                     psi.ArgumentList.Add("/rl"); psi.ArgumentList.Add("highest");
                     psi.ArgumentList.Add("/f");
@@ -596,6 +599,10 @@ namespace MakeYourChoice
         {
             InitializeComponent();
 
+            _startMinimized = Environment.GetCommandLineArgs().Any(a =>
+                string.Equals(a, "--autostart", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase));
+
             _connectionTooltipTimer = new Timer { Interval = 1000 };
             _connectionTooltipTimer.Tick += (_, __) => UpdateConnectionTooltip();
             _connectionTooltipTimer.Start();
@@ -606,29 +613,22 @@ namespace MakeYourChoice
             _sniffer = new TrafficSniffer();
             _sniffer.TrafficDetected += OnTrafficDetected;
 
-            // Load the window icon from the EXE's embedded icon (always present) rather than a loose
-            // icon.ico file, so the single-file build runs from any folder. (A bare copy of the exe
-            // has no icon.ico next to it, and the unguarded file load used to crash on startup.)
-            try
-            {
-                var embedded = Icon.ExtractAssociatedIcon(Environment.ProcessPath);
-                if (embedded != null) this.Icon = embedded;
-            }
-            catch
-            {
-                try
-                {
-                    var icoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico");
-                    if (File.Exists(icoPath)) this.Icon = new Icon(icoPath);
-                }
-                catch { /* keep default icon */ }
-            }
+            this.Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"));
             this.Shown += async (_, __) =>
             {
                 StartSniffer();
                 StartPingTimer();
                 SetupTray();
                 StartDbqTimer();
+                // Auto-started at logon: go straight to the tray, or minimize to the taskbar if the
+                // tray is disabled.
+                if (_startMinimized)
+                {
+                    if (_minimizeToTray && _tray != null)
+                        Hide();
+                    else
+                        WindowState = FormWindowState.Minimized;
+                }
                 await FetchGitIdentityAsync();
                 _ = CheckForUpdatesAsync(true);
             };

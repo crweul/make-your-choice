@@ -143,17 +143,6 @@ namespace MakeYourChoice
 
         private static Bitmap LoadAppIconBitmap()
         {
-            // Prefer the EXE's embedded icon so the tray works from any folder (single-file build).
-            try
-            {
-                var exe = Environment.ProcessPath;
-                if (!string.IsNullOrEmpty(exe))
-                {
-                    using var ico = Icon.ExtractAssociatedIcon(exe);
-                    if (ico != null) return new Bitmap(ico.ToBitmap(), 32, 32);
-                }
-            }
-            catch { /* fall through */ }
             try
             {
                 var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico");

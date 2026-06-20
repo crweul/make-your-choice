@@ -41,7 +41,7 @@ Real online/offline status for the unstable servers comes from the public [Dead 
 
 A single **system-tray icon** (the app icon with a coloured status bubble in its corner) tracks your preferred server: **green** = online, **red** = offline, **grey** = unknown. Hover it for the server status and the current killer/survivor queue time (from Dead by Queue).
 
-By default, minimizing the window sends it to the **system tray** instead of the taskbar — toggle this with **Minimize to system tray** in Program settings. Double-click the tray icon (or right-click → *Show*) to restore. A **Start with Windows** toggle (Program settings) launches the app automatically at logon (via a scheduled task, so it starts elevated without a UAC prompt).
+By default, minimizing the window sends it to the **system tray** instead of the taskbar — toggle this with **Minimize to system tray** in Program settings. Double-click the tray icon (or right-click → *Show*) to restore. A **Start with Windows** toggle (Program settings) launches the app automatically at logon (via a scheduled task, so it starts elevated without a UAC prompt). When auto-started it goes straight to the system tray (or minimizes to the taskbar if *Minimize to system tray* is off).
 
 > The standalone/portable build is the single-file `MakeYourChoice.exe` in the **`publish\`** folder — it runs from anywhere. (The loose exe under `win-x64\` needs its sibling files and won't run if copied alone.)
 
