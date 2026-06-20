@@ -185,6 +185,28 @@ fn persist_selection(app_state: &Rc<AppState>) {
     }
 }
 
+// Enable/disable launching at login via an XDG autostart .desktop entry in ~/.config/autostart.
+fn set_auto_start(enable: bool) {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("autostart");
+    let file = dir.join("make-your-choice.desktop");
+    if enable {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => return,
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=Make Your Choice\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            exe
+        );
+        let _ = std::fs::write(&file, content);
+    } else {
+        let _ = std::fs::remove_file(&file);
+    }
+}
+
 fn get_color_for_latency(ms: i64) -> &'static str {
     if ms < 0 {
         return "#778899";
@@ -2155,6 +2177,12 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
         "Show a desktop notification when your preferred server goes from offline to online.",
     ));
 
+    let autostart_check = CheckButton::with_label("Start with PC");
+    autostart_check.set_active(settings.auto_start);
+    autostart_check.set_tooltip_text(Some(
+        "Launch Make Your Choice automatically at login (adds an entry to ~/.config/autostart).",
+    ));
+
     settings_box.append(&mode_label);
     settings_box.append(&mode_combo);
     settings_box.append(&mode_notice);
@@ -2167,6 +2195,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&hard_lock_check);
     settings_box.append(&minimize_tray_check);
     settings_box.append(&notify_check);
+    settings_box.append(&autostart_check);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2263,17 +2292,23 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.use_hard_lock = hard_lock_check.is_active();
             settings.minimize_to_tray = minimize_tray_check.is_active();
             settings.notify_server_online = notify_check.is_active();
+            let autostart_changed = settings.auto_start != autostart_check.is_active();
+            settings.auto_start = autostart_check.is_active();
             settings.game_path = game_path_text;
 
             let _ = settings.save();
 
             let merge_now = settings.merge_unstable;
             let hard_lock_turned_off = hard_lock_was_on && !settings.use_hard_lock;
+            let autostart_now = settings.auto_start;
             drop(settings);
 
             // Turning the hard lock off removes its firewall rules now (two-way).
             if hard_lock_turned_off {
                 firewall::remove_lock();
+            }
+            if autostart_changed {
+                set_auto_start(autostart_now);
             }
 
             // Refresh the warning symbols in the list view
@@ -2296,6 +2331,8 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.use_hard_lock = false;
             settings.minimize_to_tray = true;
             settings.notify_server_online = false;
+            let autostart_was_on = settings.auto_start;
+            settings.auto_start = false;
             settings.game_path.clear();
 
             let _ = settings.save();
@@ -2303,6 +2340,9 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
 
             if hard_lock_was_on {
                 firewall::remove_lock();
+            }
+            if autostart_was_on {
+                set_auto_start(false);
             }
 
             // Update UI controls to reflect defaults
@@ -2313,6 +2353,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             hard_lock_check.set_active(false);
             minimize_tray_check.set_active(true);
             notify_check.set_active(false);
+            autostart_check.set_active(false);
 
             // Refresh the warning symbols in the list view
             refresh_warning_symbols(

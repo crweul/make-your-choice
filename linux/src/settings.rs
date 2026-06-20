@@ -24,6 +24,9 @@ pub struct UserSettings {
     // Last session's ticked regions, restored on launch.
     #[serde(default)]
     pub selected_regions: Vec<String>,
+    // Start automatically at login (writes an XDG autostart .desktop entry).
+    #[serde(default)]
+    pub auto_start: bool,
 }
 
 fn default_true() -> bool {
@@ -43,6 +46,7 @@ impl Default for UserSettings {
             minimize_to_tray: true,
             notify_server_online: false,
             selected_regions: Vec::new(),
+            auto_start: false,
         }
     }
 }
