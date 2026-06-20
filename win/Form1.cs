@@ -9,7 +9,6 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net.NetworkInformation;
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using System.Windows.Forms;
 using System.Threading.Tasks;
@@ -22,7 +21,7 @@ using YamlDotNet.Serialization;
 
 namespace MakeYourChoice
 {
-    public class Form1 : Form
+    public partial class Form1 : Form
     {
         [DllImport("uxtheme.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
         private static extern int SetWindowTheme(IntPtr hwnd, string pszSubAppName, string pszSubIdList);
@@ -158,11 +157,28 @@ namespace MakeYourChoice
         private enum BlockMode { Both, OnlyPing, OnlyService }
         private BlockMode _blockMode = BlockMode.Both;
         private bool _mergeUnstable = true;
-        private bool _showFleetStatus = true;
         private string _gamePath;
         private bool _darkMode = false;
-        // Fleet status: true = UDP ping responds (fleet likely active), false = no response (fleet possibly ramped down)
-        private readonly Dictionary<string, bool> _fleetActive = new();
+        // When enabled, applying your region selection also firewall-blocks the game-server data
+        // plane (UDP) of every region you did NOT choose, so DBD's fallback (e.g. N. Virginia)
+        // can't place you there. Makes choosing solo unstable servers more reliable.
+        private bool _useHardLock = false;
+        // When minimized, hide to the system tray instead of the taskbar (default on).
+        private bool _minimizeToTray = true;
+        // Notify (tray balloon) when the preferred server transitions offline -> online.
+        private bool _notifyServerOnline = false;
+        // How often (seconds) the GameLift beacon probe and the Dead by Queue poll run.
+        private int _pollIntervalSeconds = 60;
+        // Start automatically at Windows logon (via a scheduled task so the elevated app launches
+        // without a UAC prompt each login).
+        private bool _startWithWindows = false;
+        private const string AutoStartTaskName = "MakeYourChoice AutoStart";
+        // Set when launched by the autostart task (--autostart): start in the tray, or minimized
+        // to the taskbar if the tray is disabled.
+        private bool _startMinimized = false;
+        // Last session's ticked regions, restored on launch so the selection (and any matching
+        // firewall rules) is repopulated. Updated whenever settings are saved.
+        private List<string> _savedSelection = new();
         private Label _lblConnectedToValue;
         private Label _lblConnectionDot; 
         private TrafficSniffer _sniffer;
@@ -197,11 +213,16 @@ namespace MakeYourChoice
             public ApplyMode ApplyMode { get; set; }
             public BlockMode BlockMode { get; set; }
             public bool MergeUnstable { get; set; } = true;
-            public bool ShowFleetStatus { get; set; } = true;
             public string LastLaunchedVersion { get; set; }
             public string GamePath { get; set; }
             public string AutoUpdateCheckPausedUntil { get; set; }
             public bool DarkMode { get; set; }
+            public bool UseHardRegionLock { get; set; }
+            public bool MinimizeToTray { get; set; } = true;
+            public bool NotifyServerOnline { get; set; }
+            public int PollIntervalSeconds { get; set; } = 60;
+            public bool StartWithWindows { get; set; }
+            public List<string> SelectedRegions { get; set; }
         }
 
         private void LoadSettings()
@@ -221,11 +242,16 @@ namespace MakeYourChoice
                     _applyMode = settings.ApplyMode;
                     _blockMode = settings.BlockMode;
                     _mergeUnstable = settings.MergeUnstable;
-                    _showFleetStatus = settings.ShowFleetStatus;
                     _lastLaunchedVersion = settings.LastLaunchedVersion;
                     _gamePath = settings.GamePath;
                     _autoUpdateCheckPausedUntil = settings.AutoUpdateCheckPausedUntil;
                     _darkMode = settings.DarkMode;
+                    _useHardLock = settings.UseHardRegionLock;
+                    _minimizeToTray = settings.MinimizeToTray;
+                    _notifyServerOnline = settings.NotifyServerOnline;
+                    _pollIntervalSeconds = settings.PollIntervalSeconds >= 5 ? settings.PollIntervalSeconds : 60;
+                    _startWithWindows = settings.StartWithWindows;
+                    _savedSelection = settings.SelectedRegions ?? new List<string>();
                 }
             }
             catch
@@ -235,6 +261,7 @@ namespace MakeYourChoice
             // Apply theme after loading
             ApplyTheme();
             UpdateRegionListViewAppearance();
+            RestoreSelection();
         }
 
         private void SaveSettings()
@@ -249,11 +276,16 @@ namespace MakeYourChoice
                     ApplyMode = _applyMode,
                     BlockMode = _blockMode,
                     MergeUnstable = _mergeUnstable,
-                    ShowFleetStatus = _showFleetStatus,
                     LastLaunchedVersion = string.IsNullOrWhiteSpace(_lastLaunchedVersion) ? CurrentVersion : _lastLaunchedVersion,
                     GamePath = _gamePath,
                     AutoUpdateCheckPausedUntil = _autoUpdateCheckPausedUntil,
                     DarkMode = _darkMode,
+                    UseHardRegionLock = _useHardLock,
+                    MinimizeToTray = _minimizeToTray,
+                    NotifyServerOnline = _notifyServerOnline,
+                    PollIntervalSeconds = _pollIntervalSeconds,
+                    StartWithWindows = _startWithWindows,
+                    SelectedRegions = GetCheckedRegionKeys(),
                 };
                 var serializer = new SerializerBuilder().Build();
                 var yaml = serializer.Serialize(settings);
@@ -263,6 +295,120 @@ namespace MakeYourChoice
             {
                 // ignore save errors
             }
+        }
+
+        // Create/remove a logon scheduled task that launches the app elevated at startup. A
+        // scheduled task with highest privileges avoids the per-login UAC prompt a Run-key entry
+        // would trigger for this admin-required app.
+        private static void SetAutoStart(bool enable)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("schtasks")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                if (enable)
+                {
+                    var exe = Environment.ProcessPath;
+                    if (string.IsNullOrEmpty(exe)) return;
+                    psi.ArgumentList.Add("/create");
+                    psi.ArgumentList.Add("/tn"); psi.ArgumentList.Add(AutoStartTaskName);
+                    psi.ArgumentList.Add("/tr"); psi.ArgumentList.Add("\"" + exe + "\" --autostart");
+                    psi.ArgumentList.Add("/sc"); psi.ArgumentList.Add("onlogon");
+                    psi.ArgumentList.Add("/rl"); psi.ArgumentList.Add("highest");
+                    psi.ArgumentList.Add("/f");
+                }
+                else
+                {
+                    psi.ArgumentList.Add("/delete");
+                    psi.ArgumentList.Add("/tn"); psi.ArgumentList.Add(AutoStartTaskName);
+                    psi.ArgumentList.Add("/f");
+                }
+                using var p = Process.Start(psi);
+                p?.WaitForExit();
+            }
+            catch { /* ignore */ }
+        }
+
+        // Region keys currently ticked in the main list (falls back to the saved set if the list
+        // isn't built yet). Also refreshes _savedSelection so it stays current.
+        private List<string> GetCheckedRegionKeys()
+        {
+            if (_lv == null || _lv.IsDisposed)
+                return _savedSelection ?? new List<string>();
+            var list = new List<string>();
+            foreach (ListViewItem item in _lv.CheckedItems)
+                if (item.Tag is string key) list.Add(key);
+            _savedSelection = list;
+            return list;
+        }
+
+        // Re-tick the regions selected in the previous session.
+        private void RestoreSelection()
+        {
+            if (_lv == null || _lv.IsDisposed || _savedSelection == null || _savedSelection.Count == 0)
+                return;
+            var set = new HashSet<string>(_savedSelection);
+            foreach (ListViewItem item in _lv.Items)
+                if (item.Tag is string key)
+                    item.Checked = set.Contains(key);
+        }
+
+        // Extract the AWS region code (e.g. "us-east-2") from a GameLift hostname such as
+        // "gamelift.us-east-2.amazonaws.com" or "gamelift-ping.us-east-2.api.aws".
+        private static string AwsCodeFromHost(string host)
+        {
+            if (string.IsNullOrEmpty(host)) return null;
+            var parts = host.Split('.');
+            return parts.Length > 1 ? parts[1] : null;
+        }
+
+        private string AwsCodeForRegion(string regionKey)
+        {
+            if (_regions.TryGetValue(regionKey, out var info) && info.Hosts.Length > 0)
+                return AwsCodeFromHost(info.Hosts[0]);
+            return null;
+        }
+
+        // AWS region codes to firewall-block when the hard lock is on: every known region whose
+        // game-server data plane should be unreachable, i.e. all regions NOT in allowedRegions.
+        private HashSet<string> ComputeHardLockBlockCodes(IEnumerable<string> allowedRegions)
+        {
+            var allowedCodes = allowedRegions
+                .Select(AwsCodeForRegion)
+                .Where(c => c != null)
+                .ToHashSet();
+
+            var blockCodes = new HashSet<string>();
+            foreach (var key in _regions.Keys)
+            {
+                var c = AwsCodeForRegion(key);
+                if (c != null && !allowedCodes.Contains(c)) blockCodes.Add(c);
+            }
+            foreach (var kv in _blockedRegions)
+            {
+                var c = AwsCodeFromHost(kv.Value.Hosts.Length > 0 ? kv.Value.Hosts[0] : null);
+                if (c != null && !allowedCodes.Contains(c)) blockCodes.Add(c);
+            }
+            return blockCodes;
+        }
+
+        // Apply or remove the firewall hard lock to match the current toggle + allowed selection.
+        // When on, blocks the game-server data plane (UDP) of every region not in allowedRegions.
+        // Returns (handled, message): handled=false only when an apply attempt failed.
+        private async Task<(bool ok, string message)> ReconcileHardLockAsync(IEnumerable<string> allowedRegions)
+        {
+            if (!_useHardLock)
+            {
+                await Task.Run(() => FirewallManager.RemoveLock());
+                return (true, "Hard region lock is off; firewall rules removed.");
+            }
+            var blockCodes = ComputeHardLockBlockCodes(allowedRegions);
+            return await FirewallManager.ApplyLockAsync(_awsService, blockCodes);
         }
 
         private class DarkModeColorTable : ProfessionalColorTable
@@ -458,6 +604,10 @@ namespace MakeYourChoice
         {
             InitializeComponent();
 
+            _startMinimized = Environment.GetCommandLineArgs().Any(a =>
+                string.Equals(a, "--autostart", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase));
+
             _connectionTooltipTimer = new Timer { Interval = 1000 };
             _connectionTooltipTimer.Tick += (_, __) => UpdateConnectionTooltip();
             _connectionTooltipTimer.Start();
@@ -473,6 +623,17 @@ namespace MakeYourChoice
             {
                 StartSniffer();
                 StartPingTimer();
+                SetupTray();
+                StartDbqTimer();
+                // Auto-started at logon: go straight to the tray, or minimize to the taskbar if the
+                // tray is disabled.
+                if (_startMinimized)
+                {
+                    if (_minimizeToTray && _tray != null)
+                        Hide();
+                    else
+                        WindowState = FormWindowState.Minimized;
+                }
                 await FetchGitIdentityAsync();
                 _ = CheckForUpdatesAsync(true);
             };
@@ -522,11 +683,14 @@ namespace MakeYourChoice
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // Remember this session's ticked regions for next launch.
+            try { SaveSettings(); } catch { /* ignore */ }
             if (_sniffer != null)
             {
                 _sniffer.TrafficDetected -= OnTrafficDetected;
                 _sniffer.Stop();
             }
+            DisposeTray();
             base.OnFormClosing(e);
         }
 
@@ -1368,52 +1532,6 @@ namespace MakeYourChoice
             }
         }
 
-        private async Task<bool> PingGameLiftFleetAsync(string pingHost, int timeoutMs = 1500)
-        {
-            try
-            {
-                using var udp = new UdpClient();
-                udp.Client.ReceiveTimeout = timeoutMs;
-                udp.Client.SendTimeout = timeoutMs;
-
-                var packet = new byte[12];
-                // GameLift ping protocol: "GLPL" magic (4 bytes) + timestamp (8 bytes, network byte order)
-                packet[0] = 0x47; // G
-                packet[1] = 0x4C; // L
-                packet[2] = 0x50; // P
-                packet[3] = 0x4C; // L
-                var timestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                packet[4] = (byte)(timestamp >> 56);
-                packet[5] = (byte)(timestamp >> 48);
-                packet[6] = (byte)(timestamp >> 40);
-                packet[7] = (byte)(timestamp >> 32);
-                packet[8] = (byte)(timestamp >> 24);
-                packet[9] = (byte)(timestamp >> 16);
-                packet[10] = (byte)(timestamp >> 8);
-                packet[11] = (byte)timestamp;
-
-                var addresses = await Dns.GetHostAddressesAsync(pingHost);
-                if (addresses.Length == 0) return false;
-
-                // GameLift ping uses port 443 (same as HTTPS API)
-                await udp.SendAsync(packet, packet.Length, new IPEndPoint(addresses[0], 443));
-
-                var remoteEp = new IPEndPoint(IPAddress.Any, 0);
-                var response = await Task.Run(() => udp.Receive(ref remoteEp));
-
-                // Valid echo response: 12 bytes starting with "GLPL"
-                return response.Length >= 12
-                    && response[0] == 0x47
-                    && response[1] == 0x4C
-                    && response[2] == 0x50
-                    && response[3] == 0x4C;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private void StartPingTimer()
         {
             var pinger = new Ping();
@@ -1440,32 +1558,6 @@ namespace MakeYourChoice
                     results[regionKey] = ms;
                 }
 
-                // Fleet status checks: UDP ping to gamelift-ping endpoint for unstable servers
-                if (_showFleetStatus)
-                {
-                    var fleetTasks = new Dictionary<string, Task<bool>>();
-                    foreach (var kv in _regions)
-                    {
-                        if (!kv.Value.Stable)
-                        {
-                            fleetTasks[kv.Key] = PingGameLiftFleetAsync(kv.Value.Hosts[1]);
-                        }
-                    }
-                    try
-                    {
-                        await Task.WhenAll(fleetTasks.Values);
-                        lock (_fleetActive)
-                        {
-                            foreach (var kv in fleetTasks)
-                                _fleetActive[kv.Key] = kv.Value.Result;
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore fleet check errors
-                    }
-                }
-
                 // Update UI in one batch to avoid flicker (only after handles exist)
                 if (!IsHandleCreated || IsDisposed || !_lv.IsHandleCreated || _lv.IsDisposed)
                     return;
@@ -1490,19 +1582,13 @@ namespace MakeYourChoice
                             else
                             {
                                 var baseText = ms >= 0 ? $"{ms} ms" : "disconnected";
-
-                                // Fleet status indicator: show for unstable servers when enabled
-                                if (_showFleetStatus && !_regions[regionKey].Stable)
+                                // For unstable servers, show real online/offline from Dead by Queue.
+                                var code = AwsCodeForRegion(regionKey);
+                                if (!_regions[regionKey].Stable && code != null
+                                    && _dbqOnline.TryGetValue(code, out var online))
                                 {
-                                    bool fleetActive;
-                                    lock (_fleetActive)
-                                        fleetActive = _fleetActive.TryGetValue(regionKey, out var active) && active;
-
-                                    if (ms >= 0)
-                                        sub.Text = fleetActive ? baseText + "  ✓" : baseText + "  ⚠";
-                                    else
-                                        sub.Text = baseText;
-                                    sub.ForeColor = fleetActive ? GetColorForLatency(ms) : Color.Orange;
+                                    sub.Text = baseText + (online ? "  ✓" : "  ⚠");
+                                    sub.ForeColor = online ? GetColorForLatency(ms) : Color.Orange;
                                 }
                                 else
                                 {
@@ -1814,7 +1900,7 @@ namespace MakeYourChoice
             return true;
         }
 
-        private void BtnApply_Click(object sender, EventArgs e)
+        private async void BtnApply_Click(object sender, EventArgs e)
         {
             // Check for conflicting entries before proceeding
             var conflicts = DetectConflictingEntries();
@@ -2071,8 +2157,23 @@ namespace MakeYourChoice
                     }
                 }
                 catch { /* ignore */ }
+
+                // Persist the ticked selection so it's repopulated next launch (matching any
+                // firewall rules we're about to apply).
+                SaveSettings();
+
+                // Hard region lock: when enabled, also firewall-block the game-server data plane of
+                // every region NOT chosen, so DBD's server-side fallback can't place you there.
+                string lockNote = "";
+                var (lockOk, lockMsg) = await ReconcileHardLockAsync(allowedSet);
+                if (_useHardLock)
+                    lockNote = lockOk
+                        ? "\n\nHard region lock applied. Unchosen servers' game traffic is firewall-blocked."
+                        : "\n\nHard region lock could NOT be applied: " + lockMsg;
+
                 MessageBox.Show(
-                    "The hosts file was updated successfully (Gatekeep).\n\nPlease restart the game in order for changes to take effect.",
+                    "The hosts file was updated successfully (Gatekeep)." + lockNote +
+                    "\n\nPlease restart the game in order for changes to take effect.",
                     "Success",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -2397,22 +2498,22 @@ namespace MakeYourChoice
             var toolTipMerge = new ToolTip();
             toolTipMerge.SetToolTip(cbMergeUnstable, "Merge unstable servers with a stable alternative. (recommended)");
 
-            var cbShowFleetStatus = new CheckBox
+            var cbHardLock = new CheckBox
             {
-                Text = "Show fleet status for unstable servers",
+                Text = "Use hard region lock (firewall) to force exclude unchosen servers",
                 AutoSize = true,
-                Checked = _showFleetStatus,
+                Checked = _useHardLock,
                 MaximumSize = new Size(320, 0),
-                Margin = new Padding(3, 3, 3, 3)
+                Margin = new Padding(3, 8, 3, 3)
             };
-            var toolTipFleet = new ToolTip();
-            toolTipFleet.SetToolTip(cbShowFleetStatus, "Uses UDP pings to the GameLift fleet endpoint to check if Ohio, Canada Central, and London servers are likely active or ramped down by DBD.");
+            var toolTipHardLock = new ToolTip();
+            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline. With 'Merge unstable servers' also on, the similar stable servers stay allowed too. Everything else is blocked.");
 
             tlpBlock.Controls.Add(rbBoth, 0, 0);
             tlpBlock.Controls.Add(rbPing, 0, 1);
             tlpBlock.Controls.Add(rbService, 0, 2);
             tlpBlock.Controls.Add(cbMergeUnstable, 0, 3);
-            tlpBlock.Controls.Add(cbShowFleetStatus, 0, 4);
+            tlpBlock.Controls.Add(cbHardLock, 0, 4);
             blockPanel.Controls.Add(tlpBlock);
 
             // Initialize selections
@@ -2464,7 +2565,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 1
+                RowCount = 5
             };
             var cbDarkMode = new CheckBox
             {
@@ -2473,7 +2574,66 @@ namespace MakeYourChoice
                 Checked = _darkMode,
                 Margin = new Padding(3, 5, 3, 3)
             };
+            var cbMinimizeTray = new CheckBox
+            {
+                Text = "Minimize to system tray",
+                AutoSize = true,
+                Checked = _minimizeToTray,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipTray = new ToolTip();
+            toolTipTray.SetToolTip(cbMinimizeTray, "When minimized, hide to the system tray instead of the taskbar. The tray icon shows your preferred server's online status.");
+            var cbNotifyOnline = new CheckBox
+            {
+                Text = "Notify when preferred server comes online",
+                AutoSize = true,
+                Checked = _notifyServerOnline,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipNotify = new ToolTip();
+            toolTipNotify.SetToolTip(cbNotifyOnline, "Show a tray notification when your preferred server goes from offline to online.");
+            var cbStartup = new CheckBox
+            {
+                Text = "Start with Windows",
+                AutoSize = true,
+                Checked = _startWithWindows,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipStartup = new ToolTip();
+            toolTipStartup.SetToolTip(cbStartup, "Launch Make Your Choice automatically when you log in (as a scheduled task, so it starts elevated without a UAC prompt).");
+            var lblPoll = new Label
+            {
+                Text = "Server status poll interval (sec):",
+                AutoSize = true,
+                Margin = new Padding(3, 7, 3, 3)
+            };
+            var nudPollInterval = new NumericUpDown
+            {
+                Minimum = 5,
+                Maximum = 600,
+                Increment = 5,
+                Value = Math.Min(600, Math.Max(5, _pollIntervalSeconds)),
+                Width = 64,
+                Margin = new Padding(3, 4, 3, 3)
+            };
+            var toolTipPoll = new ToolTip();
+            toolTipPoll.SetToolTip(nudPollInterval, "How often the GameLift beacon and Dead by Queue status are checked (seconds). Higher is lighter on the network; lower notices a server coming online sooner. Default 60.");
+            var pollPanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0)
+            };
+            pollPanel.Controls.Add(lblPoll);
+            pollPanel.Controls.Add(nudPollInterval);
+
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
+            tlpExperimental.Controls.Add(cbMinimizeTray, 0, 1);
+            tlpExperimental.Controls.Add(cbNotifyOnline, 0, 2);
+            tlpExperimental.Controls.Add(cbStartup, 0, 3);
+            tlpExperimental.Controls.Add(pollPanel, 0, 4);
             experimentalPanel.Controls.Add(tlpExperimental);
 
             // ── Game folder ────────────────────────────────────────────
@@ -2580,9 +2740,13 @@ namespace MakeYourChoice
                 cbApplyMode.SelectedIndex = 0;
                 rbBoth.Checked = true;
                 cbMergeUnstable.Checked = true;
-                cbShowFleetStatus.Checked = true;
+                cbHardLock.Checked = false;
                 tbGamePath.Text = string.Empty;
                 cbDarkMode.Checked = false;
+                cbMinimizeTray.Checked = true;
+                cbNotifyOnline.Checked = false;
+                cbStartup.Checked = false;
+                nudPollInterval.Value = 60;
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
@@ -2626,10 +2790,22 @@ namespace MakeYourChoice
                     else                      _blockMode = BlockMode.OnlyService;
                 }
                 _mergeUnstable = cbMergeUnstable.Checked;
-                _showFleetStatus = cbShowFleetStatus.Checked;
+                // Hard region lock: two-way. Turning it OFF removes any active firewall rules now;
+                // turning it ON takes effect the next time you click "Apply Selection".
+                bool hardLockTurnedOff = _useHardLock && !cbHardLock.Checked;
+                _useHardLock = cbHardLock.Checked;
+                if (hardLockTurnedOff)
+                    FirewallManager.RemoveLock();
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
+                _minimizeToTray = cbMinimizeTray.Checked;
+                _notifyServerOnline = cbNotifyOnline.Checked;
+                _pollIntervalSeconds = (int)nudPollInterval.Value;
+                ApplyPollInterval();
+                bool startupChanged = _startWithWindows != cbStartup.Checked;
+                _startWithWindows = cbStartup.Checked;
                 SaveSettings();
+                if (startupChanged) SetAutoStart(_startWithWindows);
                 ApplyTheme();
                 UpdateRegionListViewAppearance();
                 
@@ -2664,19 +2840,6 @@ namespace MakeYourChoice
                     item.Text = regionKey + " ⚠︎";
                     item.ForeColor = Color.Orange;
                     item.ToolTipText = "Unstable server: latency issues may occur.";
-                }
-
-                // Fleet status tooltip for unstable servers
-                if (_showFleetStatus && !_regions[regionKey].Stable)
-                {
-                    bool fleetActive;
-                    lock (_fleetActive)
-                        fleetActive = _fleetActive.TryGetValue(regionKey, out var active) && active;
-
-                    var fleetNote = fleetActive
-                        ? "\nFleet: likely active (UDP ping responded)"
-                        : "\nFleet: possibly ramped down (UDP ping failed)";
-                    item.ToolTipText = (string.IsNullOrEmpty(item.ToolTipText) ? "" : item.ToolTipText) + fleetNote;
                 }
             }
         }
@@ -2722,6 +2885,11 @@ namespace MakeYourChoice
                     "#       ::1             localhost\r\n";
 
                 File.WriteAllText(HostsPath, defaultHosts);
+
+                // Reverting to default also clears the hard region lock's firewall rules.
+                FirewallManager.RemoveLock();
+                _useHardLock = false;
+                SaveSettings();
 
                 // Attempt to flush DNS (best effort)
                 try

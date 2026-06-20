@@ -26,6 +26,30 @@ Download the latest `.exe` file from the [Releases](https://github.com/crweul/ma
 The application needs to be run with [administrator permissions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/) to ensure the hosts file can be edited. Since I don't want to pay Microsoft a fee for getting this free application signed, you will be met with a prompt to trust the unknown developer.  
 <img src="https://i.imgur.com/zpMPDzM.png" alt="Main" height="350"> <img src="https://i.imgur.com/bu62CXd.png" alt="Main" height="350">
 
+## Hard Region Lock (Windows)
+Selecting a region edits your hosts file so the **client** stops measuring latency to the other regions, which makes DBD prefer the one you left. That's enough to *prefer* a region, but it can't stop DBD's **server-side fallback to N. Virginia** (`us-east-1`): you can't hosts-block Virginia (EAC/matchmaking/startup live there), and a match connects to a raw server IP over **UDP**, not a hostname.
+
+The **Use hard region lock (firewall) to force exclude unchosen servers** option in **Program settings** closes that gap. When it's on, applying your selection also creates Windows Firewall rules that block **outbound UDP 7770–7820** (the GameLift ping beacon + game-server ports) to every region you did **not** choose — using AWS's published IP ranges:
+
+- EAC / matchmaking / startup use **TCP 443**, which is never touched — the game still launches.
+- If DBD tries to drop you onto an unchosen region the match **can't connect**, so it fails/re-queues instead of putting you there.
+
+It's two-way: pick your region (e.g. Ohio) and click **Apply Selection** with the toggle on to lock; turning the toggle off (or **Reset hosts file**) removes the rules. With **Merge unstable servers** also on, the merged similar (stable) servers stay allowed too — everything else is still blocked, so an unstable pick falls back only to its similar server, never to the rest. Requires running as administrator.
+
+## Live server status & system tray (Windows)
+Real online/offline status for the unstable servers comes from the public [Dead by Queue](https://www.deadbyqueue.com) API (`/regions`), shown as ✓ (online) / ⚠ (offline) next to those servers in the list.
+
+A single **system-tray icon** (the app icon with a coloured status bubble in its corner) tracks your preferred server: **green** = online, **red** = offline, **grey** = unknown. Hover it for the server status and the current killer/survivor queue time (from Dead by Queue).
+
+By default, minimizing the window sends it to the **system tray** instead of the taskbar — toggle this with **Minimize to system tray** in Program settings. Double-click the tray icon (or right-click → *Show*) to restore. A **Start with Windows** toggle (Program settings) launches the app automatically at logon (via a scheduled task, so it starts elevated without a UAC prompt). When auto-started it goes straight to the system tray (or minimizes to the taskbar if *Minimize to system tray* is off).
+
+> The standalone/portable build is the single-file `MakeYourChoice.exe` in the **`publish\`** folder — it runs from anywhere. (The loose exe under `win-x64\` needs its sibling files and won't run if copied alone.)
+
+A **Notify when preferred server comes online** toggle (Program settings) shows a notification the moment your preferred server flips from offline to online.
+
+### Linux notes
+All of the above is also available on Linux (GTK build): the hard region lock uses **nftables** (`nft`, via a one-time `pkexec` prompt) instead of Windows Firewall; live status and the offline→online notification use the same Dead by Queue API and native desktop notifications; and the tray uses **StatusNotifierItem** (native on KDE Plasma; on GNOME it needs the AppIndicator/KStatusNotifier extension). On Linux the close button hides to the tray (rather than a separate minimize action). A **Start with PC** toggle (Program settings) adds an XDG autostart entry (`~/.config/autostart`) to launch at login; when auto-started it goes straight to the tray (or minimized if the tray is off/unavailable).
+
 # Installation: Linux / SteamOS
 > [!NOTE]
 > **For SteamOS users**: There are two ways to use Make Your Choice:  
@@ -54,20 +78,21 @@ This method can be used to build and install the program straight from source us
 Install the prerequisite packages in order to build, install and run the program. If your distro isn't listed below, find out the correct package names for your distro's package manager.
 #### Arch
 ```bash
-sudo pacman -S rust gtk4 polkit base-devel git
+sudo pacman -S rust gtk4 polkit base-devel git dbus nftables
 ```
 #### Debian / Ubuntu / ZorinOS
 ```bash
-sudo apt install cargo rustc make gcc pkg-config libgtk-4-dev git policykit-1
+sudo apt install cargo rustc make gcc pkg-config libgtk-4-dev libdbus-1-dev git policykit-1 nftables
 ```
 #### Fedora
 ```bash
-sudo dnf install cargo rust make gcc pkg-config gtk4-devel git polkit
+sudo dnf install cargo rust make gcc pkg-config gtk4-devel dbus-devel git polkit nftables
 ```
 #### openSUSE
 ```bash
-sudo zypper install cargo rust make gcc pkg-config gtk4-devel git polkit
+sudo zypper install cargo rust make gcc pkg-config gtk4-devel dbus-1-devel git polkit nftables
 ```
+> `dbus`/`libdbus-1-dev` is required to build the system-tray support; `nftables` is required at runtime for the hard region lock.
 
 ### Build & Install
 Clone and install using Makefile:

@@ -25,3 +25,4 @@ pango = "0.20"
 open = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
 pnet = "0.35.0"
+ksni = "0.2"

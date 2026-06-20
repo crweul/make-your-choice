@@ -5,6 +5,10 @@ mod settings;
 mod update;
 mod sniff;
 mod aws_ranges;
+mod dbq;
+mod firewall;
+mod tray;
+mod beacon;
 
 use gio::{Menu, SimpleAction};
 use glib::Type;
@@ -14,7 +18,7 @@ use gtk4::{
     CellRendererText, CheckButton, ComboBoxText, Dialog, Entry, FileChooserAction,
     FileChooserNative, FileFilter, Image, Label, ListStore, MenuButton, MessageDialog,
     MessageType, Orientation, PolicyType, ResponseType, ScrolledWindow, SelectionMode, Separator,
-    TreeView, TreeViewColumn,
+    SpinButton, TreeView, TreeViewColumn,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -84,7 +88,131 @@ struct AppState {
     aws_service: Arc<AwsIpService>,
     connected_to_label: Label,
     connection_dot: Label,
-    fleet_active: RefCell<HashMap<String, bool>>,
+    // AWS region code -> online(true)/offline(false). Primary source is the live GameLift beacon
+    // probe (for the selected region); Dead by Queue /regions fills in the rest as a fallback.
+    dbq_online: RefCell<HashMap<String, bool>>,
+    // Last queue-time text for the preferred region, cached by the (slow) Dead by Queue poll and
+    // shown in the tray tooltip alongside the live (fast) beacon status.
+    last_queue_text: RefCell<String>,
+    // System tray controller (None if the tray couldn't be started).
+    tray: RefCell<Option<tray::TrayController>>,
+    // For offline -> online notifications: the preferred region + its last seen online state.
+    prev_pref_region: RefCell<Option<String>>,
+    prev_pref_online: RefCell<Option<bool>>,
+    // glib source IDs for the status timers, so they can be restarted when the poll interval changes.
+    dbq_source: RefCell<Option<glib::SourceId>>,
+    beacon_source: RefCell<Option<glib::SourceId>>,
+}
+
+// AWS region code (e.g. "us-east-2") from a region's first GameLift host.
+fn aws_code_for_region(regions: &HashMap<String, RegionInfo>, key: &str) -> Option<String> {
+    regions
+        .get(key)
+        .and_then(|info| info.hosts.first())
+        .and_then(|h| h.split('.').nth(1).map(|s| s.to_string()))
+}
+
+// The preferred region the tray/notifications track: first checked unstable region, else first.
+fn preferred_region(app_state: &Rc<AppState>) -> Option<String> {
+    let selected = app_state.selected_regions.borrow();
+    if selected.is_empty() {
+        return None;
+    }
+    let unstable = selected
+        .iter()
+        .find(|k| app_state.regions.get(*k).map(|i| !i.stable).unwrap_or(false));
+    unstable.or_else(|| selected.iter().next()).cloned()
+}
+
+// AWS region codes to firewall-block: every known region NOT in the merge-aware allowed set.
+fn compute_block_codes(
+    app_state: &Rc<AppState>,
+    selected: &HashSet<String>,
+    merge_unstable: bool,
+) -> HashSet<String> {
+    let regions = &app_state.regions;
+    let mut allowed: HashSet<String> = selected.clone();
+    let any_stable = selected
+        .iter()
+        .any(|r| regions.get(r).map(|i| i.stable).unwrap_or(false));
+    if merge_unstable && !any_stable {
+        let additions: Vec<String> = selected
+            .iter()
+            .filter_map(|r| {
+                let info = regions.get(r)?;
+                if info.stable {
+                    return None;
+                }
+                let group = get_group_name(r);
+                regions
+                    .iter()
+                    .find(|(k, i)| get_group_name(k) == group && i.stable)
+                    .map(|(k, _)| k.clone())
+            })
+            .collect();
+        for a in additions {
+            allowed.insert(a);
+        }
+    }
+    let allowed_codes: HashSet<String> = allowed
+        .iter()
+        .filter_map(|k| aws_code_for_region(regions, k))
+        .collect();
+
+    let mut block = HashSet::new();
+    for k in regions.keys() {
+        if let Some(c) = aws_code_for_region(regions, k) {
+            if !allowed_codes.contains(&c) {
+                block.insert(c);
+            }
+        }
+    }
+    for k in app_state.blocked_regions.keys() {
+        if let Some(c) = aws_code_for_region(&app_state.blocked_regions, k) {
+            if !allowed_codes.contains(&c) {
+                block.insert(c);
+            }
+        }
+    }
+    block
+}
+
+fn send_online_notification(short_name: &str) {
+    if let Some(app) = gio::Application::default() {
+        let n = gio::Notification::new("Server online");
+        n.set_body(Some(&format!("{} is now online.", short_name)));
+        app.send_notification(Some("myc-server-online"), &n);
+    }
+}
+
+fn persist_selection(app_state: &Rc<AppState>) {
+    let selected: Vec<String> = app_state.selected_regions.borrow().iter().cloned().collect();
+    if let Ok(mut s) = app_state.settings.lock() {
+        s.selected_regions = selected;
+        let _ = s.save();
+    }
+}
+
+// Enable/disable launching at login via an XDG autostart .desktop entry in ~/.config/autostart.
+fn set_auto_start(enable: bool) {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("autostart");
+    let file = dir.join("make-your-choice.desktop");
+    if enable {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => return,
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=Make Your Choice\nExec={} --autostart\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            exe
+        );
+        let _ = std::fs::write(&file, content);
+    } else {
+        let _ = std::fs::remove_file(&file);
+    }
 }
 
 fn get_color_for_latency(ms: i64) -> &'static str {
@@ -107,8 +235,6 @@ fn refresh_warning_symbols(
     list_store: &ListStore,
     regions: &HashMap<String, RegionInfo>,
     merge_unstable: bool,
-    show_fleet_status: bool,
-    fleet_active_map: &HashMap<String, bool>,
 ) {
     if let Some(iter) = list_store.iter_first() {
         loop {
@@ -127,18 +253,12 @@ fn refresh_warning_symbols(
                         clean_name
                     };
 
-                    // Build tooltip
-                    let mut tooltip = String::new();
-                    if !region_info.stable && !merge_unstable {
-                        tooltip = "Unstable: issues may occur.".to_string();
-                    }
-                    if show_fleet_status && !region_info.stable {
-                        let fleet_note = match fleet_active_map.get(&clean_name) {
-                            Some(true) => "\nFleet: likely active (UDP ping responded)",
-                            _ => "\nFleet: possibly ramped down (UDP ping failed)",
-                        };
-                        tooltip.push_str(fleet_note);
-                    }
+                    // Update tooltip based on merge_unstable setting
+                    let tooltip = if !region_info.stable && !merge_unstable {
+                        "Unstable: issues may occur.".to_string()
+                    } else {
+                        String::new()
+                    };
 
                     list_store.set(&iter, &[(0, &display_name), (6, &tooltip)]);
                 }
@@ -736,8 +856,45 @@ fn build_ui(app: &Application) {
         aws_service,
         connected_to_label: connected_value,
         connection_dot: connection_dot,
-        fleet_active: RefCell::new(HashMap::new()),
+        dbq_online: RefCell::new(HashMap::new()),
+        last_queue_text: RefCell::new(String::new()),
+        tray: RefCell::new(None),
+        prev_pref_region: RefCell::new(None),
+        prev_pref_online: RefCell::new(None),
+        dbq_source: RefCell::new(None),
+        beacon_source: RefCell::new(None),
     });
+
+    // Restore the previous session's ticked regions (and populate the selection set).
+    {
+        let saved: HashSet<String> = app_state
+            .settings
+            .lock()
+            .unwrap()
+            .selected_regions
+            .iter()
+            .cloned()
+            .collect();
+        if !saved.is_empty() {
+            let mut selected = app_state.selected_regions.borrow_mut();
+            if let Some(iter) = app_state.list_store.iter_first() {
+                loop {
+                    let is_divider = app_state.list_store.get::<bool>(&iter, 4);
+                    if !is_divider {
+                        let name = app_state.list_store.get::<String>(&iter, 0);
+                        let clean = name.replace(" ⚠︎", "");
+                        if saved.contains(&clean) {
+                            app_state.list_store.set(&iter, &[(3, &true)]);
+                            selected.insert(clean);
+                        }
+                    }
+                    if !app_state.list_store.iter_next(&iter) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // Create menu bar
     let menu_bar = GtkBox::new(Orientation::Horizontal, 5);
@@ -861,12 +1018,48 @@ fn build_ui(app: &Application) {
         handle_revert_click(&app_state_clone, &window_clone);
     });
 
-    // Start ping timer
+    // Start ping + Dead by Queue timers
     start_ping_timer(app_state.clone());
+    start_dbq_timer(app_state.clone());
+    start_beacon_timer(app_state.clone());
 
-    // Ensure helper sniffer exits when the window closes
+    // System tray (best-effort; StatusNotifierItem — KDE native, GNOME needs AppIndicator ext).
+    // Menu actions arrive on `rx`, polled here on the GTK main thread.
+    if let Some((controller, rx)) = tray::start_tray() {
+        *app_state.tray.borrow_mut() = Some(controller);
+        let window_for_tray = window.clone();
+        let app_state_for_tray = app_state.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    tray::TrayMsg::Show => {
+                        window_for_tray.set_visible(true);
+                        window_for_tray.present();
+                    }
+                    tray::TrayMsg::Exit => {
+                        persist_selection(&app_state_for_tray);
+                        app_state_for_tray.sniffer.stop();
+                        if let Some(app) = gio::Application::default() {
+                            app.quit();
+                        }
+                    }
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    // Close button: hide to the system tray when enabled and the tray is active; otherwise quit.
     let app_state_clone = app_state.clone();
+    let window_for_close = window.clone();
     window.connect_close_request(move |_| {
+        let minimize = app_state_clone.settings.lock().unwrap().minimize_to_tray;
+        let has_tray = app_state_clone.tray.borrow().is_some();
+        if minimize && has_tray {
+            window_for_close.set_visible(false);
+            return glib::Propagation::Stop;
+        }
+        persist_selection(&app_state_clone);
         app_state_clone.sniffer.stop();
         glib::Propagation::Proceed
     });
@@ -874,7 +1067,23 @@ fn build_ui(app: &Application) {
     // Check for updates silently on launch
     check_for_updates_silent(&app_state, &window);
 
-    window.present();
+    // When auto-started at login (--autostart): go straight to the tray, or minimize to the
+    // taskbar if the tray is disabled/unavailable. Otherwise show the window normally.
+    let autostarted = std::env::args().any(|a| a == "--autostart" || a == "--minimized");
+    let minimize_to_tray = app_state
+        .settings
+        .lock()
+        .map(|s| s.minimize_to_tray)
+        .unwrap_or(true);
+    let tray_active = app_state.tray.borrow().is_some();
+    if autostarted && minimize_to_tray && tray_active {
+        // Start hidden in the tray (don't map the window); restore via the tray menu.
+    } else {
+        window.present();
+        if autostarted {
+            window.minimize();
+        }
+    }
 }
 
 fn create_version_menu(_window: &ApplicationWindow, _app_state: &Rc<AppState>) -> Menu {
@@ -1643,6 +1852,15 @@ fn reset_hosts_action(app_state: &Rc<AppState>, window: &ApplicationWindow) {
         if response == ResponseType::Yes {
             match app_state.hosts_manager.restore_default() {
                 Ok(_) => {
+                    // Reverting to default also clears the hard region lock's firewall rules.
+                    {
+                        let mut s = app_state.settings.lock().unwrap();
+                        if s.use_hard_lock {
+                            s.use_hard_lock = false;
+                            let _ = s.save();
+                            firewall::remove_lock();
+                        }
+                    }
                     show_info_dialog(
                         &window,
                         "Success",
@@ -1816,6 +2034,13 @@ fn apply_hosts_changes(
 
     match result {
         Ok(_) => {
+            // Persist the ticked selection for next launch.
+            {
+                let mut s = app_state.settings.lock().unwrap();
+                s.selected_regions = selected.iter().cloned().collect();
+                let _ = s.save();
+            }
+
             show_info_dialog(
                 window,
                 "Success",
@@ -1824,6 +2049,24 @@ fn apply_hosts_changes(
                     apply_mode
                 ),
             );
+
+            // Hard region lock: firewall-block the game-server data plane of every region NOT in
+            // the (merge-aware) allowed set, so DBD's server-side fallback can't place you there.
+            let use_hard_lock = app_state.settings.lock().unwrap().use_hard_lock;
+            if use_hard_lock {
+                let block = compute_block_codes(app_state, selected, merge_unstable);
+                let aws = app_state.aws_service.clone();
+                let runtime = app_state.tokio_runtime.clone();
+                let window = window.clone();
+                glib::spawn_future_local(async move {
+                    let res = runtime
+                        .spawn(async move { firewall::apply_lock(&aws, &block).await })
+                        .await;
+                    if let Ok(Err(e)) = res {
+                        show_error_dialog(&window, "Hard region lock", &e);
+                    }
+                });
+            }
         }
         Err(e) => {
             show_error_dialog(window, "Error", &e.to_string());
@@ -1943,9 +2186,41 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     let merge_check = CheckButton::with_label("Merge unstable servers (recommended)");
     merge_check.set_active(settings.merge_unstable);
 
-    // Show fleet status
-    let fleet_check = CheckButton::with_label("Show fleet status for unstable servers");
-    fleet_check.set_active(settings.show_fleet_status);
+    let hard_lock_check =
+        CheckButton::with_label("Use hard region lock (firewall) to force exclude unchosen servers");
+    hard_lock_check.set_active(settings.use_hard_lock);
+    hard_lock_check.set_tooltip_text(Some(
+        "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline. With 'Merge unstable servers' also on, the similar stable servers stay allowed too. Everything else is blocked. (Requires nftables; prompts for admin via pkexec.)",
+    ));
+
+    let minimize_tray_check = CheckButton::with_label("Minimize to system tray");
+    minimize_tray_check.set_active(settings.minimize_to_tray);
+    minimize_tray_check.set_tooltip_text(Some(
+        "When you close the window, hide to the system tray instead of quitting.",
+    ));
+
+    let notify_check = CheckButton::with_label("Notify when preferred server comes online");
+    notify_check.set_active(settings.notify_server_online);
+    notify_check.set_tooltip_text(Some(
+        "Show a desktop notification when your preferred server goes from offline to online.",
+    ));
+
+    let autostart_check = CheckButton::with_label("Start with PC");
+    autostart_check.set_active(settings.auto_start);
+    autostart_check.set_tooltip_text(Some(
+        "Launch Make Your Choice automatically at login (adds an entry to ~/.config/autostart).",
+    ));
+
+    let poll_label = Label::new(Some("Server status poll interval (seconds):"));
+    poll_label.set_halign(gtk4::Align::Start);
+    let poll_spin = SpinButton::with_range(5.0, 600.0, 5.0);
+    poll_spin.set_value(settings.poll_interval_seconds.max(5) as f64);
+    poll_spin.set_tooltip_text(Some(
+        "How often the GameLift beacon and Dead by Queue status are checked. Higher is lighter on the network; lower notices a server coming online sooner. Default 60.",
+    ));
+    let poll_row = GtkBox::new(Orientation::Horizontal, 6);
+    poll_row.append(&poll_label);
+    poll_row.append(&poll_spin);
 
     settings_box.append(&mode_label);
     settings_box.append(&mode_combo);
@@ -1956,7 +2231,11 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&rb_ping);
     settings_box.append(&rb_service);
     settings_box.append(&merge_check);
-    settings_box.append(&fleet_check);
+    settings_box.append(&hard_lock_check);
+    settings_box.append(&minimize_tray_check);
+    settings_box.append(&notify_check);
+    settings_box.append(&autostart_check);
+    settings_box.append(&poll_row);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2049,19 +2328,38 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             };
 
             settings.merge_unstable = merge_check.is_active();
-            settings.show_fleet_status = fleet_check.is_active();
+            let hard_lock_was_on = settings.use_hard_lock;
+            settings.use_hard_lock = hard_lock_check.is_active();
+            settings.minimize_to_tray = minimize_tray_check.is_active();
+            settings.notify_server_online = notify_check.is_active();
+            settings.poll_interval_seconds = poll_spin.value() as u64;
+            let autostart_changed = settings.auto_start != autostart_check.is_active();
+            settings.auto_start = autostart_check.is_active();
             settings.game_path = game_path_text;
 
             let _ = settings.save();
 
+            let merge_now = settings.merge_unstable;
+            let hard_lock_turned_off = hard_lock_was_on && !settings.use_hard_lock;
+            let autostart_now = settings.auto_start;
+            drop(settings);
+
+            // Apply the (possibly changed) poll interval to the status timers immediately.
+            restart_status_timers(app_state_clone.clone());
+
+            // Turning the hard lock off removes its firewall rules now (two-way).
+            if hard_lock_turned_off {
+                firewall::remove_lock();
+            }
+            if autostart_changed {
+                set_auto_start(autostart_now);
+            }
+
             // Refresh the warning symbols in the list view
-            let fleet_active = app_state_clone.fleet_active.borrow().clone();
             refresh_warning_symbols(
                 &app_state_clone.list_store,
                 &app_state_clone.regions,
-                settings.merge_unstable,
-                settings.show_fleet_status,
-                &fleet_active,
+                merge_now,
             );
 
             dialog.close();
@@ -2073,26 +2371,44 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.apply_mode = ApplyMode::Gatekeep;
             settings.block_mode = BlockMode::Both;
             settings.merge_unstable = true;
-            settings.show_fleet_status = true;
+            let hard_lock_was_on = settings.use_hard_lock;
+            settings.use_hard_lock = false;
+            settings.minimize_to_tray = true;
+            settings.notify_server_online = false;
+            settings.poll_interval_seconds = 60;
+            let autostart_was_on = settings.auto_start;
+            settings.auto_start = false;
             settings.game_path.clear();
 
             let _ = settings.save();
+            drop(settings);
+
+            // Apply the default poll interval to the status timers immediately.
+            restart_status_timers(app_state_clone.clone());
+
+            if hard_lock_was_on {
+                firewall::remove_lock();
+            }
+            if autostart_was_on {
+                set_auto_start(false);
+            }
 
             // Update UI controls to reflect defaults
             game_path_entry.set_text("");
             mode_combo.set_active(Some(0));
             rb_both.set_active(true);
             merge_check.set_active(true);
-            fleet_check.set_active(true);
+            hard_lock_check.set_active(false);
+            minimize_tray_check.set_active(true);
+            notify_check.set_active(false);
+            autostart_check.set_active(false);
+            poll_spin.set_value(60.0);
 
             // Refresh the warning symbols in the list view
-            let fleet_active = app_state_clone.fleet_active.borrow().clone();
             refresh_warning_symbols(
                 &app_state_clone.list_store,
                 &app_state_clone.regions,
-                settings.merge_unstable,
-                settings.show_fleet_status,
-                &fleet_active,
+                true,
             );
 
             // Don't close dialog - let user see the changes
@@ -2170,9 +2486,7 @@ fn start_ping_timer(app_state: Rc<AppState>) {
         let blocked_hosts = app_state.hosts_manager.get_blocked_hostnames();
         let runtime = app_state.tokio_runtime.clone();
         let list_store = app_state.list_store.clone();
-        let show_fleet = app_state.settings.lock().map(|s| s.show_fleet_status).unwrap_or(true);
-        let fleet_active = app_state.fleet_active.clone();
-        let regions_for_fleet = regions.clone();
+        let dbq = app_state.dbq_online.borrow().clone();
 
         // Spawn work on tokio runtime in background thread
         glib::spawn_future_local(async move {
@@ -2193,27 +2507,6 @@ fn start_ping_timer(app_state: Rc<AppState>) {
                 .await
                 .unwrap();
 
-            // Fleet status checks
-            if show_fleet {
-                let fleet_results = runtime
-                    .spawn(async move {
-                        let mut results = HashMap::new();
-                        for (region_name, region_info) in regions_for_fleet.iter() {
-                            if !region_info.stable {
-                                if let Some(ping_host) = region_info.hosts.get(1) {
-                                    let active = ping::ping_gamelift_fleet(ping_host).await;
-                                    results.insert(region_name.clone(), active);
-                                }
-                            }
-                        }
-                        results
-                    })
-                    .await
-                    .unwrap();
-
-                fleet_active.replace(fleet_results);
-            }
-
             // Update the UI on the main thread
             if let Some(iter) = list_store.iter_first() {
                 loop {
@@ -2224,44 +2517,23 @@ fn start_ping_timer(app_state: Rc<AppState>) {
                         let name = list_store.get::<String>(&iter, 0);
                         let clean_name = name.replace(" ⚠︎", "");
 
-                        let is_unstable = regions.get(&clean_name).map(|r| !r.stable).unwrap_or(false);
-
                         if is_region_blocked_by_hosts(&clean_name, &regions, &blocked_regions, &blocked_hosts) {
                             list_store.set(&iter, &[(1, &"disconnected".to_string()), (5, &"gray".to_string())]);
                         } else if let Some(&latency) = latency_results.get(&clean_name) {
-                            let (latency_text, color) = if show_fleet && is_unstable {
-                                let active = fleet_active.borrow().get(&clean_name).copied().unwrap_or(false);
-                                if latency >= 0 {
-                                    let text = if active {
-                                        format!("{} ms  ✓", latency)
-                                    } else {
-                                        format!("{} ms  ⚠", latency)
-                                    };
-                                    let color = if active { get_color_for_latency(latency) } else { "#ffa500" };
-                                    (text, color.to_string())
-                                } else {
-                                    ("disconnected".to_string(), "#778899".to_string())
-                                }
+                            let base = if latency >= 0 {
+                                format!("{} ms", latency)
                             } else {
-                                let text = if latency >= 0 {
-                                    format!("{} ms", latency)
-                                } else {
-                                    "disconnected".to_string()
-                                };
-                                let color = get_color_for_latency(latency);
-                                (text, color.to_string())
+                                "disconnected".to_string()
                             };
-                            let tooltip = if show_fleet && is_unstable {
-                                let active = fleet_active.borrow().get(&clean_name).copied().unwrap_or(false);
-                                if active {
-                                    "Fleet: likely active (UDP ping responded)".to_string()
-                                } else {
-                                    "Fleet: possibly ramped down (UDP ping failed)".to_string()
-                                }
-                            } else {
-                                String::new()
+                            // For unstable servers, show real online/offline from Dead by Queue.
+                            let stable = regions.get(&clean_name).map(|i| i.stable).unwrap_or(true);
+                            let code = aws_code_for_region(&regions, &clean_name);
+                            let (text, color) = match code.as_ref().filter(|_| !stable).and_then(|c| dbq.get(c)) {
+                                Some(true) => (format!("{}  ✓", base), get_color_for_latency(latency).to_string()),
+                                Some(false) => (format!("{}  ⚠", base), "#ffa500".to_string()),
+                                None => (base, get_color_for_latency(latency).to_string()),
                             };
-                            list_store.set(&iter, &[(1, &latency_text), (5, &color), (6, &tooltip)]);
+                            list_store.set(&iter, &[(1, &text), (5, &color)]);
                         }
                     }
 
@@ -2274,6 +2546,139 @@ fn start_ping_timer(app_state: Rc<AppState>) {
 
         glib::ControlFlow::Continue
     });
+}
+
+// The configured status poll interval (seconds), clamped to a sane minimum.
+fn poll_interval_secs(app_state: &Rc<AppState>) -> u32 {
+    let s = app_state.settings.lock().unwrap().poll_interval_seconds;
+    s.max(5) as u32
+}
+
+// Stop and restart both status timers so a changed poll interval takes effect immediately.
+fn restart_status_timers(app_state: Rc<AppState>) {
+    if let Some(id) = app_state.dbq_source.borrow_mut().take() {
+        id.remove();
+    }
+    if let Some(id) = app_state.beacon_source.borrow_mut().take() {
+        id.remove();
+    }
+    start_dbq_timer(app_state.clone());
+    start_beacon_timer(app_state);
+}
+
+// Slow Dead by Queue poll: caches the per-region online map (fallback for non-selected regions)
+// and the preferred region's queue-time text. The beacon timer owns the live tray status +
+// notifications. Both run at the configurable poll interval (default 60s).
+fn start_dbq_timer(app_state: Rc<AppState>) {
+    let secs = poll_interval_secs(&app_state);
+    let timer_state = app_state.clone();
+    let id = glib::timeout_add_seconds_local(secs, move || {
+        let runtime = timer_state.tokio_runtime.clone();
+        let app_state = timer_state.clone();
+        glib::spawn_future_local(async move {
+            let status = runtime
+                .spawn(async { dbq::get_region_status().await })
+                .await
+                .unwrap_or_default();
+            if !status.is_empty() {
+                let mut map = app_state.dbq_online.borrow_mut();
+                for (k, v) in status {
+                    map.insert(k, v);
+                }
+            }
+
+            if let Some(pref) = preferred_region(&app_state) {
+                if let Some(c) = aws_code_for_region(&app_state.regions, &pref) {
+                    let queue = runtime
+                        .spawn(async move { dbq::get_queue(&c).await })
+                        .await
+                        .map(|(t, _)| t)
+                        .unwrap_or_default();
+                    *app_state.last_queue_text.borrow_mut() = queue;
+                }
+            }
+        });
+        glib::ControlFlow::Continue
+    });
+    *app_state.dbq_source.borrow_mut() = Some(id);
+}
+
+// Live status: probes ONLY the selected region's GameLift ping beacon directly (beacon-primary),
+// falling back to the cached Dead by Queue map when the probe is inconclusive. Owns the tray
+// icon/tooltip and the offline -> online notification. Runs at the configurable poll interval.
+fn start_beacon_timer(app_state: Rc<AppState>) {
+    let secs = poll_interval_secs(&app_state);
+    let timer_state = app_state.clone();
+    let id = glib::timeout_add_seconds_local(secs, move || {
+        let runtime = timer_state.tokio_runtime.clone();
+        let app_state = timer_state.clone();
+        glib::spawn_future_local(async move {
+            let Some(pref) = preferred_region(&app_state) else {
+                if let Some(t) = app_state.tray.borrow().as_ref() {
+                    t.update(None, "Select a region to track".to_string());
+                }
+                *app_state.prev_pref_region.borrow_mut() = None;
+                *app_state.prev_pref_online.borrow_mut() = None;
+                return;
+            };
+            let code = aws_code_for_region(&app_state.regions, &pref);
+            let ping_host = app_state
+                .regions
+                .get(&pref)
+                .and_then(|i| i.hosts.get(1).or_else(|| i.hosts.first()))
+                .cloned();
+
+            // Beacon is primary; fall back to the cached Dead by Queue map when inconclusive (None).
+            let mut online = match ping_host {
+                Some(h) => runtime
+                    .spawn(async move { beacon::is_fleet_online(&h, 1500).await })
+                    .await
+                    .unwrap_or(None),
+                None => None,
+            };
+            if online.is_none() {
+                online = code
+                    .as_ref()
+                    .and_then(|c| app_state.dbq_online.borrow().get(c).copied());
+            }
+            // Feed the live result back into the map so the latency list tracks it too.
+            if let (Some(o), Some(c)) = (online, code.clone()) {
+                app_state.dbq_online.borrow_mut().insert(c, o);
+            }
+
+            let short = pref
+                .split('(')
+                .nth(1)
+                .map(|s| s.trim_end_matches(')').to_string())
+                .unwrap_or_else(|| pref.clone());
+            let state_str = match online {
+                Some(true) => "ONLINE",
+                Some(false) => "OFFLINE",
+                None => "status unknown",
+            };
+            let queue = app_state.last_queue_text.borrow().clone();
+            if let Some(t) = app_state.tray.borrow().as_ref() {
+                t.update(online, format!("{}: {} | {}", short, state_str, queue));
+            }
+
+            // Notify on an offline -> online transition for the same preferred region.
+            let notify = app_state.settings.lock().unwrap().notify_server_online;
+            if notify {
+                let prev_region = app_state.prev_pref_region.borrow().clone();
+                let prev_online = *app_state.prev_pref_online.borrow();
+                if prev_region.as_deref() == Some(pref.as_str())
+                    && prev_online == Some(false)
+                    && online == Some(true)
+                {
+                    send_online_notification(&short);
+                }
+            }
+            *app_state.prev_pref_region.borrow_mut() = Some(pref.clone());
+            *app_state.prev_pref_online.borrow_mut() = online;
+        });
+        glib::ControlFlow::Continue
+    });
+    *app_state.beacon_source.borrow_mut() = Some(id);
 }
 
 fn is_region_blocked_by_hosts(

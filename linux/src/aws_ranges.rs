@@ -10,6 +10,7 @@ pub struct AwsCidr {
     mask: u32,
     prefix_len: u8,
     region: String,
+    prefix: String,
 }
 
 #[derive(Clone)]
@@ -60,6 +61,7 @@ impl AwsIpService {
                         mask,
                         prefix_len,
                         region: region.to_string(),
+                        prefix: ip_prefix.to_string(),
                     });
                 }
             }
@@ -92,6 +94,20 @@ impl AwsIpService {
         }
 
         best.map(|c| Self::get_pretty_region_name(&c.region))
+    }
+
+    /// CIDR strings (e.g. "3.5.0.0/16") for the given AWS region codes. Used to firewall-block
+    /// a region's game-server data plane.
+    pub async fn get_cidrs_for_regions(&self, codes: &std::collections::HashSet<String>) -> Vec<String> {
+        let _ = self.refresh().await;
+        let cidrs = self.cidrs.lock().unwrap();
+        let mut set = std::collections::HashSet::new();
+        for c in cidrs.iter() {
+            if codes.contains(&c.region) {
+                set.insert(c.prefix.clone());
+            }
+        }
+        set.into_iter().collect()
     }
 
     pub fn get_pretty_region_name(region_code: &str) -> String {
