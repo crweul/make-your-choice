@@ -27,7 +27,7 @@ pub struct UserSettings {
     // Start automatically at login (writes an XDG autostart .desktop entry).
     #[serde(default)]
     pub auto_start: bool,
-    // How often (seconds) the GameLift beacon probe and the Dead by Queue poll run.
+    // How often (seconds) the Dead by Queue server-status poll runs.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_seconds: u64,
 }
@@ -37,7 +37,7 @@ fn default_true() -> bool {
 }
 
 fn default_poll_interval() -> u64 {
-    60
+    30
 }
 
 impl Default for UserSettings {
@@ -54,7 +54,7 @@ impl Default for UserSettings {
             notify_server_online: false,
             selected_regions: Vec::new(),
             auto_start: false,
-            poll_interval_seconds: 60,
+            poll_interval_seconds: 30,
         }
     }
 }

@@ -168,7 +168,7 @@ namespace MakeYourChoice
         // Notify (tray balloon) when the preferred server transitions offline -> online.
         private bool _notifyServerOnline = false;
         // How often (seconds) the GameLift beacon probe and the Dead by Queue poll run.
-        private int _pollIntervalSeconds = 60;
+        private int _pollIntervalSeconds = 30;
         // Start automatically at Windows logon (via a scheduled task so the elevated app launches
         // without a UAC prompt each login).
         private bool _startWithWindows = false;
@@ -220,7 +220,7 @@ namespace MakeYourChoice
             public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
             public bool NotifyServerOnline { get; set; }
-            public int PollIntervalSeconds { get; set; } = 60;
+            public int PollIntervalSeconds { get; set; } = 30;
             public bool StartWithWindows { get; set; }
             public List<string> SelectedRegions { get; set; }
         }
@@ -2543,7 +2543,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 6,
+                RowCount = 7,
                 Padding = new Padding(0)
             };
 
@@ -2600,7 +2600,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 5
+                RowCount = 6
             };
 
             var rbBoth = new RadioButton { Text = "Block both (default)", AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
@@ -2685,7 +2685,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 5
+                RowCount = 1
             };
             var cbDarkMode = new CheckBox
             {
@@ -2737,7 +2737,7 @@ namespace MakeYourChoice
                 Margin = new Padding(3, 4, 3, 3)
             };
             var toolTipPoll = new ToolTip();
-            toolTipPoll.SetToolTip(nudPollInterval, "How often the GameLift beacon and Dead by Queue status are checked (seconds). Higher is lighter on the network; lower notices a server coming online sooner. Default 60.");
+            toolTipPoll.SetToolTip(nudPollInterval, "How often the Dead by Queue server status is checked (seconds). Higher is lighter on the network; lower notices a server coming online sooner. Default 30.");
             var pollPanel = new FlowLayoutPanel
             {
                 AutoSize = true,
@@ -2750,11 +2750,32 @@ namespace MakeYourChoice
             pollPanel.Controls.Add(nudPollInterval);
 
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
-            tlpExperimental.Controls.Add(cbMinimizeTray, 0, 1);
-            tlpExperimental.Controls.Add(cbNotifyOnline, 0, 2);
-            tlpExperimental.Controls.Add(cbStartup, 0, 3);
-            tlpExperimental.Controls.Add(pollPanel, 0, 4);
             experimentalPanel.Controls.Add(tlpExperimental);
+
+            // Server status poll interval now lives under Gatekeep Options.
+            tlpBlock.Controls.Add(pollPanel, 0, 5);
+
+            // ── App ────────────────────────────────────────────────────
+            var appPanel = new GroupBox
+            {
+                Text = "App",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10),
+                Dock = DockStyle.Fill
+            };
+            var tlpApp = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                RowCount = 3
+            };
+            tlpApp.Controls.Add(cbMinimizeTray, 0, 0);
+            tlpApp.Controls.Add(cbNotifyOnline, 0, 1);
+            tlpApp.Controls.Add(cbStartup, 0, 2);
+            appPanel.Controls.Add(tlpApp);
 
             // ── Game folder ────────────────────────────────────────────
             var gamePanel = new GroupBox
@@ -2866,7 +2887,7 @@ namespace MakeYourChoice
                 cbMinimizeTray.Checked = true;
                 cbNotifyOnline.Checked = false;
                 cbStartup.Checked = false;
-                nudPollInterval.Value = 60;
+                nudPollInterval.Value = 30;
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
@@ -2874,10 +2895,11 @@ namespace MakeYourChoice
 
             tlpMain.Controls.Add(modePanel, 0, 0);
             tlpMain.Controls.Add(blockPanel, 0, 1);
-            tlpMain.Controls.Add(experimentalPanel, 0, 2);
-            tlpMain.Controls.Add(gamePanel, 0, 3);
-            tlpMain.Controls.Add(lblTipSettings, 0, 4);
-            tlpMain.Controls.Add(buttonPanel, 0, 5);
+            tlpMain.Controls.Add(appPanel, 0, 2);
+            tlpMain.Controls.Add(experimentalPanel, 0, 3);
+            tlpMain.Controls.Add(gamePanel, 0, 4);
+            tlpMain.Controls.Add(lblTipSettings, 0, 5);
+            tlpMain.Controls.Add(buttonPanel, 0, 6);
 
             dialog.Controls.Add(tlpMain);
             dialog.AcceptButton = btnOk;
