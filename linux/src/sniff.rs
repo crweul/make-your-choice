@@ -12,8 +12,8 @@ pub struct TrafficSniffer {
 }
 
 impl TrafficSniffer {
-    pub fn new<F>(callback: F) -> Self 
-    where F: Fn(String, u16) + Send + 'static + Sync
+    pub fn new<F>(callback: F) -> Self
+    where F: Fn(String, u16, u16) + Send + 'static + Sync
     {
         let running = Arc::new(AtomicBool::new(true));
         
@@ -29,7 +29,7 @@ impl TrafficSniffer {
     }
 
     fn sniff<F>(running: Arc<AtomicBool>, callback: F)
-    where F: Fn(String, u16)
+    where F: Fn(String, u16, u16)
     {
         let interfaces = datalink::interfaces();
         let interface = interfaces
@@ -78,7 +78,9 @@ impl TrafficSniffer {
                                             header.get_destination()
                                         };
                                         let port = if src_in_range { src_port } else { dst_port };
-                                        callback(remote_ip.to_string(), port);
+                                        // Our local port is the side NOT in the game range.
+                                        let local_port = if src_in_range { dst_port } else { src_port };
+                                        callback(remote_ip.to_string(), port, local_port);
                                     }
                                 }
                             }

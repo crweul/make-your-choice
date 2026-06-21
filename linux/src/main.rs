@@ -8,6 +8,8 @@ mod aws_ranges;
 mod dbq;
 mod firewall;
 mod tray;
+mod live_probe;
+mod server_registry;
 
 use gio::{Menu, SimpleAction};
 use glib::Type;
@@ -85,6 +87,8 @@ struct AppState {
     tokio_runtime: Arc<Runtime>,
     sniffer: Arc<TrafficSniffer>,
     aws_service: Arc<AwsIpService>,
+    // Learned + seeded DBD server endpoints per region, probed by the active beacon.
+    server_registry: Arc<server_registry::ServerRegistry>,
     connected_to_label: Label,
     connection_dot: Label,
     // AWS region code -> online(true)/offline(false), from Dead by Queue /regions (the only source
@@ -793,13 +797,23 @@ fn build_ui(app: &Application) {
         });
     }
 
+    // Learned + seeded DBD servers, probed by the beacon.
+    let server_registry = Arc::new(server_registry::ServerRegistry::new());
+
     // Initialize Sniffer
     let aws_service_clone = aws_service.clone();
     let runtime_clone = tokio_runtime.clone();
     let region_tx_clone = region_tx.clone();
     let last_seen_clone = last_seen.clone();
+    let registry_clone = server_registry.clone();
+    let harvested: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
-    let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port| {
+    let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port, local_port| {
+        // Ignore the beacon's own probe packets (and the server replies to them) so a probe never
+        // shows as a real connection or self-feeds the pool.
+        if live_probe::is_beacon_local_port(local_port) {
+            return;
+        }
         if let Ok(last) = last_seen_clone.lock() {
             if let Some((last_ip, last_region)) = &*last {
                 if last_ip == &remote_ip {
@@ -813,11 +827,25 @@ fn build_ui(app: &Application) {
         let ip_string = remote_ip.clone();
         let region_tx = region_tx_clone.clone();
         let last_seen_update = last_seen_clone.clone();
+        let registry = registry_clone.clone();
+        let harvested = harvested.clone();
+        let port = _port;
 
         runtime.spawn(async move {
             let region_name_opt = aws.get_region(&ip_string).await;
             if let Ok(mut last) = last_seen_update.lock() {
                 *last = Some((ip_string.clone(), region_name_opt.clone()));
+            }
+            // Learn this server (and harvest the instance's full port set once) into the pool.
+            if let Some(code) = aws.get_region_code(&ip_string).await {
+                registry.record(&code, &ip_string, port);
+                let first_seen = harvested.lock().map(|mut h| h.insert(ip_string.clone())).unwrap_or(false);
+                if first_seen {
+                    let ports = live_probe::harvest_live_ports(&ip_string).await;
+                    for p in ports {
+                        registry.record(&code, &ip_string, p);
+                    }
+                }
             }
             let _ = region_tx.send((ip_string, region_name_opt));
         });
@@ -851,6 +879,7 @@ fn build_ui(app: &Application) {
         tokio_runtime,
         sniffer,
         aws_service,
+        server_registry,
         connected_to_label: connected_value,
         connection_dot: connection_dot,
         dbq_online: RefCell::new(HashMap::new()),
@@ -2156,17 +2185,36 @@ fn handle_apply_click(app_state: &Rc<AppState>, window: &ApplicationWindow) {
 }
 
 fn handle_revert_click(app_state: &Rc<AppState>, window: &ApplicationWindow) {
-    match app_state.hosts_manager.revert() {
-        Ok(_) => {
-            show_info_dialog(
-                window,
-                "Reverted",
-                "Cleared Make Your Choice entries. Your existing hosts lines were left untouched.",
-            );
+    let result = app_state.hosts_manager.revert();
+
+    // Untick every region in the UI and clear the saved selection so the list matches the cleared
+    // backend and doesn't repopulate next launch (ticks used to persist even when nothing applied).
+    if let Some(iter) = app_state.list_store.iter_first() {
+        loop {
+            let is_divider = app_state.list_store.get::<bool>(&iter, 4);
+            if !is_divider {
+                app_state.list_store.set(&iter, &[(3, &false)]);
+            }
+            if !app_state.list_store.iter_next(&iter) {
+                break;
+            }
         }
-        Err(e) => {
-            show_error_dialog(window, "Error", &e.to_string());
-        }
+    }
+    app_state.selected_regions.borrow_mut().clear();
+    persist_selection(app_state);
+
+    // Remove any firewall hard lock too, so Revert clears both backends like the Windows build.
+    if app_state.settings.lock().map(|s| s.use_hard_lock).unwrap_or(false) {
+        firewall::remove_lock();
+    }
+
+    match result {
+        Ok(_) => show_info_dialog(
+            window,
+            "Reverted",
+            "Cleared Make Your Choice entries, unticked all regions, and removed any firewall lock.",
+        ),
+        Err(e) => show_error_dialog(window, "Error", &e.to_string()),
     }
 }
 
@@ -2649,6 +2697,41 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 let mut map = app_state.dbq_online.borrow_mut();
                 for (k, v) in status {
                     map.insert(k, v);
+                }
+            }
+
+            // Active beacon: probe the known server pool for each unstable region. A confirmed UE
+            // handshake challenge flips that region online in real time (going around DBQ's lag).
+            // "No reply" is inconclusive, so we never force offline here — DBQ stays the down source.
+            {
+                let mut codes: Vec<String> = Vec::new();
+                for (name, info) in app_state.regions.iter() {
+                    if info.stable {
+                        continue;
+                    }
+                    if let Some(c) = aws_code_for_region(&app_state.regions, name) {
+                        if !codes.contains(&c) {
+                            codes.push(c);
+                        }
+                    }
+                }
+                for code in codes {
+                    let targets = app_state.server_registry.candidates(&code, 64);
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    let summary = runtime
+                        .spawn(async move { live_probe::probe_batch(targets, 1000, 32).await })
+                        .await
+                        .ok();
+                    if let Some(s) = summary {
+                        if s.any_live {
+                            app_state.dbq_online.borrow_mut().insert(code.clone(), true);
+                            if let Some((ip, port)) = s.first_live {
+                                app_state.server_registry.record(&code, &ip, port);
+                            }
+                        }
+                    }
                 }
             }
 

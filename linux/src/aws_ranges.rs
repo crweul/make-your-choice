@@ -96,6 +96,27 @@ impl AwsIpService {
         best.map(|c| Self::get_pretty_region_name(&c.region))
     }
 
+    /// Raw AWS region code (e.g. "us-east-2") for an IP, or None. Used to key learned servers.
+    pub async fn get_region_code(&self, ip_str: &str) -> Option<String> {
+        self.refresh().await.ok()?;
+        let ip: IpAddr = ip_str.parse().ok()?;
+        let ip_v4 = match ip {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => return None,
+        };
+        let ip_val = u32::from(ip_v4);
+        let cidrs = self.cidrs.lock().unwrap();
+        let mut best: Option<&AwsCidr> = None;
+        for cidr in cidrs.iter() {
+            if (ip_val & cidr.mask) == cidr.network
+                && best.map_or(true, |b| cidr.prefix_len > b.prefix_len)
+            {
+                best = Some(cidr);
+            }
+        }
+        best.map(|c| c.region.clone())
+    }
+
     /// CIDR strings (e.g. "3.5.0.0/16") for the given AWS region codes. Used to firewall-block
     /// a region's game-server data plane.
     pub async fn get_cidrs_for_regions(&self, codes: &std::collections::HashSet<String>) -> Vec<String> {

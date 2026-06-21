@@ -1,3 +1,9 @@
-version: v2.8
+version: v3.0
 notes:
-  - Fixed potential crash when launching MakeYourChoice while in game on Windows.
+  - "Hard Region Lock (firewall): optionally block every region you didn't pick so DBD can't fall back to N. Virginia. EAC/matchmaking are left alone, so the game still launches."
+  - "Live server status: real online/offline for the unstable servers (Ohio, Canada, London), shown as a check/warning in the list."
+  - "System tray: minimizes to a single icon with a green/red status bubble; hover shows status and queue time."
+  - "Notifications when your preferred server comes online."
+  - "Configurable status poll interval (default 60s)."
+  - "Your region selection is remembered across launches."
+  - "Note: built for Windows; a Linux version is in development."
