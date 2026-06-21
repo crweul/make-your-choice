@@ -48,11 +48,77 @@ namespace MakeYourChoice
         // the trailing client nonce being "stale" does not stop the server issuing a fresh challenge.
         private const string UeHandshakeHex =
             "b801028000c91ef81100000000000000000000000000000000000000000000000000000000000001e05886665b064cc46901";
-        // Bytes 5..8 of any handshake packet (client or server) — the build magic. A reply carrying
-        // this is a confirmed UE handshake challenge (strongest "fleet up" signal).
-        private static readonly byte[] Magic = { 0xc9, 0x1e, 0xf8, 0x11 };
+        // The hardcoded bootstrap handshake (from the original capture). Once the user plays, the
+        // live handshake captured from the sniffer takes over, so the probe template tracks the
+        // current DBD build automatically and survives netcode patches.
+        private static readonly byte[] BootstrapHandshake = FromHex(UeHandshakeHex);
+        private static readonly object _hsLock = new object();
+        private static byte[] _learnedHandshake = LoadLearned();
 
-        private static readonly byte[] UeHandshake = FromHex(UeHandshakeHex);
+        private static string HandshakePath => System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MakeYourChoice", "handshake.hex");
+
+        // The handshake we currently probe with: learned-from-live if we have one, else bootstrap.
+        private static byte[] ActiveHandshake()
+        {
+            lock (_hsLock) return _learnedHandshake ?? BootstrapHandshake;
+        }
+
+        // Current build magic = bytes 5..8 of the active handshake. Used to recognise a real DBD
+        // challenge reply; tracks the live handshake so it stays correct across game updates.
+        private static byte[] ActiveMagic()
+        {
+            var hs = ActiveHandshake();
+            return hs.Length >= 9 ? new[] { hs[5], hs[6], hs[7], hs[8] } : new byte[] { 0xc9, 0x1e, 0xf8, 0x11 };
+        }
+
+        /// <summary>
+        /// Adopt a UE InitialConnect handshake captured live from the game's own traffic as the probe
+        /// template. If the magic differs from what we had, that's a netcode patch — we log it and
+        /// auto-update (no manual recapture needed). Persisted so it survives restarts.
+        /// </summary>
+        public static void SetLearnedHandshake(byte[] payload)
+        {
+            if (payload == null || payload.Length < 18 || payload[0] != 0xB8) return;
+            lock (_hsLock)
+            {
+                var current = _learnedHandshake ?? BootstrapHandshake;
+                bool sameMagic = current.Length >= 9 && payload.Length >= 9
+                    && current[5] == payload[5] && current[6] == payload[6]
+                    && current[7] == payload[7] && current[8] == payload[8];
+                if (_learnedHandshake != null && sameMagic) return; // already current -> no churn/spam
+                _learnedHandshake = (byte[])payload.Clone();
+                try
+                {
+                    System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(HandshakePath));
+                    System.IO.File.WriteAllText(HandshakePath, BitConverter.ToString(payload).Replace("-", ""));
+                }
+                catch { /* best effort */ }
+                string oldM = BitConverter.ToString(current, 5, 4).Replace("-", "");
+                string newM = BitConverter.ToString(payload, 5, 4).Replace("-", "");
+                BeaconLog.Write(sameMagic
+                    ? $"HANDSHAKE learned from live game traffic (magic {newM})"
+                    : $"HANDSHAKE magic changed {oldM} -> {newM} — DBD likely patched; probe template auto-updated from live traffic");
+            }
+        }
+
+        private static byte[] LoadLearned()
+        {
+            try
+            {
+                var p = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "MakeYourChoice", "handshake.hex");
+                if (System.IO.File.Exists(p))
+                {
+                    var hex = System.IO.File.ReadAllText(p).Trim();
+                    if (hex.Length >= 18 && hex.Length % 2 == 0) return FromHex(hex);
+                }
+            }
+            catch { /* ignore */ }
+            return null;
+        }
 
         public readonly struct ProbeReport
         {
@@ -108,7 +174,8 @@ namespace MakeYourChoice
         private static bool HasMagic(byte[] buf, int n)
         {
             if (n < 9) return false;
-            for (int i = 0; i < 4; i++) if (buf[5 + i] != Magic[i]) return false;
+            var m = ActiveMagic();
+            for (int i = 0; i < 4; i++) if (buf[5 + i] != m[i]) return false;
             return true;
         }
 
@@ -177,7 +244,7 @@ namespace MakeYourChoice
 
         /// <summary>Replay the UE InitialConnect handshake to a known game-server endpoint.</summary>
         public static Task<ProbeReport> ProbeHandshakeAsync(string ip, int port, int timeoutMs = 1200)
-            => ProbeUdpAsync("UE-HS", UeHandshake, ip, port, timeoutMs);
+            => ProbeUdpAsync("UE-HS", ActiveHandshake(), ip, port, timeoutMs);
 
         /// <summary>Secondary Steam query probe (logged for comparison).</summary>
         public static Task<ProbeReport> ProbeA2sAsync(string ip, int port, int timeoutMs = 1200)
@@ -199,7 +266,7 @@ namespace MakeYourChoice
                 await Parallel.ForEachAsync(ports, new ParallelOptions { MaxDegreeOfParallelism = maxConcurrent },
                     async (p, _) =>
                     {
-                        var r = await ProbeUdpAsync("HARVEST", UeHandshake, ip, p, timeoutMs).ConfigureAwait(false);
+                        var r = await ProbeUdpAsync("HARVEST", ActiveHandshake(), ip, p, timeoutMs).ConfigureAwait(false);
                         if (r.IsLiveServer) lock (sync) live.Add(p);
                     }).ConfigureAwait(false);
             }
@@ -234,7 +301,7 @@ namespace MakeYourChoice
             {
                 await Parallel.ForEachAsync(targets, opts, async (t, _) =>
                 {
-                    var r = await ProbeUdpAsync("UE-HS", UeHandshake, t.ip, t.port, timeoutMs).ConfigureAwait(false);
+                    var r = await ProbeUdpAsync("UE-HS", ActiveHandshake(), t.ip, t.port, timeoutMs).ConfigureAwait(false);
                     lock (sync)
                     {
                         switch (r.Outcome)

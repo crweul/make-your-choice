@@ -46,6 +46,19 @@ namespace MakeYourChoice
         private readonly Dictionary<string, string> _statusSource = new();
         private bool _beaconStartupLogged;
 
+        // Status is RESOLVED fresh each poll from three inputs, in priority order:
+        //   live  — a real connection seen by the sniffer, but ONLY while recent (it must not stick
+        //           online forever after you stop playing)
+        //   beacon — the active handshake probe (online if a server replies; offline if a non-trivial
+        //            pool is entirely unreachable)
+        //   dbq    — Dead by Queue, the lagged fallback
+        // _dbqOnline/_statusSource below hold the RESOLVED result (read by the tray + latency list).
+        private enum BeaconState { Unknown, Online, Offline }
+        private readonly Dictionary<string, bool> _dbqRaw = new();         // DBQ's own /regions view
+        private readonly Dictionary<string, DateTime> _lastConnection = new(); // UTC of last real connection
+        private readonly Dictionary<string, BeaconState> _beaconResult = new();
+        private const int LiveWindowSeconds = 120; // a connection counts as "live" for this long
+
         private void SetupTray()
         {
             if (_tray != null) return; // already set up
@@ -96,7 +109,12 @@ namespace MakeYourChoice
         {
             if (string.IsNullOrEmpty(regionName)) return;
             var code = AwsCodeForRegion(regionName);
-            if (code != null) { _dbqOnline[code] = true; _statusSource[code] = "live"; }
+            if (code == null) return;
+            // Record WHEN we connected; "live" is authoritative only while recent (see ResolveStatuses),
+            // so it no longer sticks online forever after you stop playing. Set immediate feedback too.
+            _lastConnection[code] = DateTime.UtcNow;
+            _dbqOnline[code] = true;
+            _statusSource[code] = "live";
         }
 
         // EXPERIMENT — for every unstable region we have learned servers for, actively probe them and
@@ -127,12 +145,10 @@ namespace MakeYourChoice
                 var candidates = _serverRegistry.GetCandidates(code, 64);
                 if (candidates.Count == 0)
                 {
+                    _beaconResult[code] = BeaconState.Unknown; // nothing to probe -> defer to DBQ
                     BeaconLog.Write($"BEACON {code}  no learned servers yet — connect once to seed");
                     continue;
                 }
-
-                bool live = false;
-                string foundIp = null; int foundPort = 0;
 
                 // Replay the UE handshake to the whole known pool for this region, in parallel,
                 // stopping at the first confirmed DBD challenge. A reply is DEFINITIVE proof the fleet
@@ -150,15 +166,57 @@ namespace MakeYourChoice
                 try { hist = await LiveProbe.ProbeBatchAsync(targets, 1000, 32, stopOnLive: true); }
                 catch { hist = new LiveProbe.SweepSummary(); }
                 BeaconLog.Write($"BEACON {code}  pool({candidates.Count}) -> {hist}");
-                if (hist.AnyLive) { live = true; foundIp = hist.FirstLive.Ip; foundPort = hist.FirstLive.Port; }
 
-                if (live)
+                if (hist.AnyLive)
                 {
-                    _dbqOnline[code] = true;
-                    _statusSource[code] = "beacon";
-                    if (foundIp != null) _serverRegistry.Record(code, foundIp, foundPort); // refresh the live one
-                    BeaconLog.Write($"BEACON {code}  => ONLINE (UE handshake challenge, {foundIp}:{foundPort})");
+                    _beaconResult[code] = BeaconState.Online;
+                    if (hist.FirstLive.Ip != null) _serverRegistry.Record(code, hist.FirstLive.Ip, hist.FirstLive.Port);
+                    BeaconLog.Write($"BEACON {code}  => ONLINE ({hist.FirstLive.Ip}:{hist.FirstLive.Port})");
                 }
+                else
+                {
+                    // Assert OFFLINE only when a non-trivial pool (enough endpoints across >=2 distinct
+                    // instances) is ENTIRELY unreachable — no replies and no ICMP port-unreachable (which
+                    // would mean an instance is still alive). Otherwise leave it to DBQ.
+                    int distinctIps = candidates.Select(c => c.Ip).Distinct().Count();
+                    if (hist.Total >= 8 && distinctIps >= 2 && hist.Replied == 0 && hist.PortUnreach == 0)
+                    {
+                        _beaconResult[code] = BeaconState.Offline;
+                        BeaconLog.Write($"BEACON {code}  => OFFLINE (pool of {hist.Total} across {distinctIps} IPs all unreachable)");
+                    }
+                    else
+                    {
+                        _beaconResult[code] = BeaconState.Unknown;
+                    }
+                }
+            }
+        }
+
+        // Resolve each region's displayed status from the three inputs, in priority order:
+        // recent live connection > active beacon (online/offline) > Dead by Queue. Writes the result
+        // into _dbqOnline/_statusSource, which the tray and the latency list read.
+        private void ResolveStatuses()
+        {
+            var now = DateTime.UtcNow;
+            var codes = new HashSet<string>(_dbqRaw.Keys);
+            if (_regions != null)
+                foreach (var kv in _regions)
+                {
+                    var c = AwsCodeForRegion(kv.Key);
+                    if (c != null) codes.Add(c);
+                }
+
+            foreach (var code in codes)
+            {
+                if (_lastConnection.TryGetValue(code, out var t) && (now - t).TotalSeconds < LiveWindowSeconds)
+                {
+                    _dbqOnline[code] = true; _statusSource[code] = "live"; continue;
+                }
+                var bs = _beaconResult.TryGetValue(code, out var b) ? b : BeaconState.Unknown;
+                if (bs == BeaconState.Online) { _dbqOnline[code] = true; _statusSource[code] = "beacon"; continue; }
+                if (bs == BeaconState.Offline) { _dbqOnline[code] = false; _statusSource[code] = "beacon"; continue; }
+                if (_dbqRaw.TryGetValue(code, out var d)) { _dbqOnline[code] = d; _statusSource[code] = "dbq"; continue; }
+                _dbqOnline.Remove(code); _statusSource.Remove(code); // nothing knows -> unknown
             }
         }
 
@@ -176,19 +234,13 @@ namespace MakeYourChoice
 
             var status = await DbqClient.GetRegionStatusAsync();
             if (status.Count > 0)
-            {
-                // DBQ is the baseline; the active beacon and a live sniffer connection can still
-                // override a region to online afterward.
-                foreach (var kv in status)
-                {
-                    _dbqOnline[kv.Key] = kv.Value;
-                    if (!_statusSource.ContainsKey(kv.Key) || _statusSource[kv.Key] == "dbq")
-                        _statusSource[kv.Key] = "dbq";
-                }
-            }
+                foreach (var kv in status) _dbqRaw[kv.Key] = kv.Value; // DBQ's own view (fallback input)
 
-            // EXPERIMENT — active beacon: probe learned servers and override to online in real time.
+            // Active beacon: probe learned servers (fills _beaconResult per region).
             await RunActiveBeaconAsync();
+
+            // Resolve the displayed status: recent live > beacon > DBQ.
+            ResolveStatuses();
 
             if (_exiting || IsDisposed || _tray == null) return;
 
@@ -235,10 +287,11 @@ namespace MakeYourChoice
             _prevPreferredOnline = online;
 
             var queue = string.IsNullOrEmpty(queueText) ? "" : "  -  " + queueText;
-            // EXPERIMENT — show which source produced this status (beacon = real-time active probe).
+            // Show which source produced this status (beacon = real-time active probe), for online
+            // and offline alike.
             string src = "";
-            if (code != null && online == true && _statusSource.TryGetValue(code, out var s))
-                src = s == "beacon" ? "  [beacon]" : s == "live" ? "  [live]" : "  [dbq]";
+            if (code != null && online != null && _statusSource.TryGetValue(code, out var s))
+                src = "  [" + s + "]";
             _tray.Text = Trunc($"{shortName}: {state}{queue}{src}");
         }
 

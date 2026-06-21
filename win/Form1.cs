@@ -639,6 +639,8 @@ namespace MakeYourChoice
 
             _sniffer = new TrafficSniffer();
             _sniffer.TrafficDetected += OnTrafficDetected;
+            // Auto-update the beacon's probe template from the game's own handshake (survives patches).
+            _sniffer.HandshakeCaptured += LiveProbe.SetLearnedHandshake;
 
             this.Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"));
             this.Shown += async (_, __) =>
@@ -710,6 +712,7 @@ namespace MakeYourChoice
             if (_sniffer != null)
             {
                 _sniffer.TrafficDetected -= OnTrafficDetected;
+                _sniffer.HandshakeCaptured -= LiveProbe.SetLearnedHandshake;
                 _sniffer.Stop();
             }
             DisposeTray();
@@ -795,6 +798,9 @@ namespace MakeYourChoice
 
             if (string.Equals(_lastDetectedIp, ip, StringComparison.Ordinal))
             {
+                // Same server we're already connected to: refresh the "live" timestamp so the region
+                // stays live for the whole match, not just the first packet.
+                MarkRegionOnlineFromConnection(_lastDetectedRegion);
                 UpdateUi(_lastDetectedRegion);
                 return;
             }
