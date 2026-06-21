@@ -1,9 +1,6 @@
 version: v3.0
 notes:
-  - "Hard Region Lock (firewall): optionally block every region you didn't pick so DBD can't fall back to N. Virginia. EAC/matchmaking are left alone, so the game still launches."
-  - "Live server status: real online/offline for the unstable servers (Ohio, Canada, London), shown as a check/warning in the list."
-  - "System tray: minimizes to a single icon with a green/red status bubble; hover shows status and queue time."
-  - "Notifications when your preferred server comes online."
-  - "Configurable status poll interval (default 60s)."
-  - "Your region selection is remembered across launches."
-  - "Note: built for Windows; a Linux version is in development."
+  - "Live server beacon: pings the real game servers to show when an unstable region (Ohio, Canada, London) is actually online, in real time — faster than the public queue API."
+  - "Hard Region Lock (firewall), now scoped to just Dead by Daylight, so DBD can't fall back to N. Virginia."
+  - "System tray with a green/red status bubble, plus notifications when your server comes online."
+  - "Revert to Default now unticks every region and clears the firewall too."
