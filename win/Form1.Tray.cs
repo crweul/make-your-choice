@@ -53,7 +53,7 @@ namespace MakeYourChoice
         //            pool is entirely unreachable)
         //   dbq    — Dead by Queue, the lagged fallback
         // _dbqOnline/_statusSource below hold the RESOLVED result (read by the tray + latency list).
-        private enum BeaconState { Unknown, Online, Offline }
+        private enum BeaconState { Unknown, Online } // a probe can only confirm ONLINE, never OFFLINE
         private readonly Dictionary<string, bool> _dbqRaw = new();         // DBQ's own /regions view
         private readonly Dictionary<string, DateTime> _lastConnection = new(); // UTC of last real connection
         private readonly Dictionary<string, BeaconState> _beaconResult = new();
@@ -175,19 +175,10 @@ namespace MakeYourChoice
                 }
                 else
                 {
-                    // Assert OFFLINE only when a non-trivial pool (enough endpoints across >=2 distinct
-                    // instances) is ENTIRELY unreachable — no replies and no ICMP port-unreachable (which
-                    // would mean an instance is still alive). Otherwise leave it to DBQ.
-                    int distinctIps = candidates.Select(c => c.Ip).Distinct().Count();
-                    if (hist.Total >= 8 && distinctIps >= 2 && hist.Replied == 0 && hist.PortUnreach == 0)
-                    {
-                        _beaconResult[code] = BeaconState.Offline;
-                        BeaconLog.Write($"BEACON {code}  => OFFLINE (pool of {hist.Total} across {distinctIps} IPs all unreachable)");
-                    }
-                    else
-                    {
-                        _beaconResult[code] = BeaconState.Unknown;
-                    }
+                    // No live reply is INCONCLUSIVE — the pool may have churned, the region may be
+                    // scaled down, or the handshake stale. We never assert OFFLINE from a probe; the
+                    // down/unknown case always defers to DBQ.
+                    _beaconResult[code] = BeaconState.Unknown;
                 }
             }
         }
@@ -214,7 +205,7 @@ namespace MakeYourChoice
                 }
                 var bs = _beaconResult.TryGetValue(code, out var b) ? b : BeaconState.Unknown;
                 if (bs == BeaconState.Online) { _dbqOnline[code] = true; _statusSource[code] = "beacon"; continue; }
-                if (bs == BeaconState.Offline) { _dbqOnline[code] = false; _statusSource[code] = "beacon"; continue; }
+                // No positive live/beacon signal -> defer entirely to DBQ (online or offline).
                 if (_dbqRaw.TryGetValue(code, out var d)) { _dbqOnline[code] = d; _statusSource[code] = "dbq"; continue; }
                 _dbqOnline.Remove(code); _statusSource.Remove(code); // nothing knows -> unknown
             }
