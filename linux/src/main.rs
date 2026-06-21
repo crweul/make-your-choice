@@ -8,7 +8,6 @@ mod aws_ranges;
 mod dbq;
 mod firewall;
 mod tray;
-mod beacon;
 
 use gio::{Menu, SimpleAction};
 use glib::Type;
@@ -88,20 +87,18 @@ struct AppState {
     aws_service: Arc<AwsIpService>,
     connected_to_label: Label,
     connection_dot: Label,
-    // AWS region code -> online(true)/offline(false). Primary source is the live GameLift beacon
-    // probe (for the selected region); Dead by Queue /regions fills in the rest as a fallback.
+    // AWS region code -> online(true)/offline(false), from Dead by Queue /regions (the only source
+    // that reflects DBD fleet state). A live sniffer connection can override a region to online.
     dbq_online: RefCell<HashMap<String, bool>>,
-    // Last queue-time text for the preferred region, cached by the (slow) Dead by Queue poll and
-    // shown in the tray tooltip alongside the live (fast) beacon status.
+    // Last queue-time text for the preferred region, shown in the tray tooltip.
     last_queue_text: RefCell<String>,
     // System tray controller (None if the tray couldn't be started).
     tray: RefCell<Option<tray::TrayController>>,
     // For offline -> online notifications: the preferred region + its last seen online state.
     prev_pref_region: RefCell<Option<String>>,
     prev_pref_online: RefCell<Option<bool>>,
-    // glib source IDs for the status timers, so they can be restarted when the poll interval changes.
+    // glib source ID for the status poll timer, so it can be restarted when the interval changes.
     dbq_source: RefCell<Option<glib::SourceId>>,
-    beacon_source: RefCell<Option<glib::SourceId>>,
 }
 
 // AWS region code (e.g. "us-east-2") from a region's first GameLift host.
@@ -862,7 +859,6 @@ fn build_ui(app: &Application) {
         prev_pref_region: RefCell::new(None),
         prev_pref_online: RefCell::new(None),
         dbq_source: RefCell::new(None),
-        beacon_source: RefCell::new(None),
     });
 
     // Restore the previous session's ticked regions (and populate the selection set).
@@ -1021,7 +1017,6 @@ fn build_ui(app: &Application) {
     // Start ping + Dead by Queue timers
     start_ping_timer(app_state.clone());
     start_dbq_timer(app_state.clone());
-    start_beacon_timer(app_state.clone());
 
     // System tray (best-effort; StatusNotifierItem — KDE native, GNOME needs AppIndicator ext).
     // Menu actions arrive on `rx`, polled here on the GTK main thread.
@@ -2074,8 +2069,65 @@ fn apply_hosts_changes(
     }
 }
 
+// Re-apply the current Gatekeep selection silently (no dialogs): re-write hosts and, if the hard
+// lock is on, re-apply the firewall. Used when Merge or the hard-lock toggle changes in settings,
+// so the backend always matches the UI without clicking Apply or Revert.
+fn reapply_gatekeep_silently(app_state: &Rc<AppState>) {
+    let selected = app_state.selected_regions.borrow().clone();
+    if selected.is_empty() {
+        return;
+    }
+    let (block_mode, merge_unstable, use_hard_lock) = {
+        let s = app_state.settings.lock().unwrap();
+        (s.block_mode, s.merge_unstable, s.use_hard_lock)
+    };
+    let _ = app_state.hosts_manager.apply_gatekeep(
+        &app_state.regions,
+        &app_state.blocked_regions,
+        &selected,
+        block_mode,
+        merge_unstable,
+    );
+    if use_hard_lock {
+        let block = compute_block_codes(app_state, &selected, merge_unstable);
+        let aws = app_state.aws_service.clone();
+        let runtime = app_state.tokio_runtime.clone();
+        glib::spawn_future_local(async move {
+            let _ = runtime
+                .spawn(async move { firewall::apply_lock(&aws, &block).await })
+                .await;
+        });
+    }
+}
+
 fn handle_apply_click(app_state: &Rc<AppState>, window: &ApplicationWindow) {
     let selected = app_state.selected_regions.borrow().clone();
+
+    // No regions ticked -> clear all restrictions (hosts entries + firewall lock), like Revert.
+    if selected.is_empty() {
+        let had_lock = {
+            let mut s = app_state.settings.lock().unwrap();
+            s.selected_regions.clear();
+            let h = s.use_hard_lock;
+            let _ = s.save();
+            h
+        };
+        match app_state.hosts_manager.revert() {
+            Ok(_) => {
+                if had_lock {
+                    firewall::remove_lock();
+                }
+                show_info_dialog(
+                    window,
+                    "Restrictions cleared",
+                    "All Make Your Choice restrictions were cleared (host entries and any firewall lock removed).\n\nPlease restart the game for changes to take effect.",
+                );
+            }
+            Err(e) => show_error_dialog(window, "Error", &e.to_string()),
+        }
+        return;
+    }
+
     let settings = app_state.settings.lock().unwrap();
 
     // Check for conflicting entries before proceeding
@@ -2327,8 +2379,10 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
                 BlockMode::OnlyService
             };
 
+            let merge_changed = settings.merge_unstable != merge_check.is_active();
             settings.merge_unstable = merge_check.is_active();
             let hard_lock_was_on = settings.use_hard_lock;
+            let hard_lock_changed = hard_lock_was_on != hard_lock_check.is_active();
             settings.use_hard_lock = hard_lock_check.is_active();
             settings.minimize_to_tray = minimize_tray_check.is_active();
             settings.notify_server_online = notify_check.is_active();
@@ -2340,6 +2394,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             let _ = settings.save();
 
             let merge_now = settings.merge_unstable;
+            let apply_mode_now = settings.apply_mode;
             let hard_lock_turned_off = hard_lock_was_on && !settings.use_hard_lock;
             let autostart_now = settings.auto_start;
             drop(settings);
@@ -2350,6 +2405,16 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             // Turning the hard lock off removes its firewall rules now (two-way).
             if hard_lock_turned_off {
                 firewall::remove_lock();
+            }
+
+            // Keep the backend in sync with the UI on demand: if a Gatekeep selection is applied and
+            // Merge or the hard lock changed, re-apply now (hosts + firewall) — no need to Revert.
+            let section_active = !app_state_clone.hosts_manager.get_blocked_hostnames().is_empty();
+            if apply_mode_now == ApplyMode::Gatekeep
+                && (merge_changed || hard_lock_changed)
+                && section_active
+            {
+                reapply_gatekeep_silently(&app_state_clone);
             }
             if autostart_changed {
                 set_auto_start(autostart_now);
@@ -2554,21 +2619,17 @@ fn poll_interval_secs(app_state: &Rc<AppState>) -> u32 {
     s.max(5) as u32
 }
 
-// Stop and restart both status timers so a changed poll interval takes effect immediately.
+// Stop and restart the status timer so a changed poll interval takes effect immediately.
 fn restart_status_timers(app_state: Rc<AppState>) {
     if let Some(id) = app_state.dbq_source.borrow_mut().take() {
         id.remove();
     }
-    if let Some(id) = app_state.beacon_source.borrow_mut().take() {
-        id.remove();
-    }
-    start_dbq_timer(app_state.clone());
-    start_beacon_timer(app_state);
+    start_dbq_timer(app_state);
 }
 
-// Slow Dead by Queue poll: caches the per-region online map (fallback for non-selected regions)
-// and the preferred region's queue-time text. The beacon timer owns the live tray status +
-// notifications. Both run at the configurable poll interval (default 60s).
+// Poll Dead by Queue for real online/offline status + queue time, and update the tray + notify.
+// (The GameLift-beacon probe was removed: the beacon can't read DBD fleet state — UDP 443 never
+// echoes, and 7770 echoes for every region — so it always reported the selected region as down.)
 fn start_dbq_timer(app_state: Rc<AppState>) {
     let secs = poll_interval_secs(&app_state);
     let timer_state = app_state.clone();
@@ -2587,32 +2648,6 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 }
             }
 
-            if let Some(pref) = preferred_region(&app_state) {
-                if let Some(c) = aws_code_for_region(&app_state.regions, &pref) {
-                    let queue = runtime
-                        .spawn(async move { dbq::get_queue(&c).await })
-                        .await
-                        .map(|(t, _)| t)
-                        .unwrap_or_default();
-                    *app_state.last_queue_text.borrow_mut() = queue;
-                }
-            }
-        });
-        glib::ControlFlow::Continue
-    });
-    *app_state.dbq_source.borrow_mut() = Some(id);
-}
-
-// Live status: probes ONLY the selected region's GameLift ping beacon directly (beacon-primary),
-// falling back to the cached Dead by Queue map when the probe is inconclusive. Owns the tray
-// icon/tooltip and the offline -> online notification. Runs at the configurable poll interval.
-fn start_beacon_timer(app_state: Rc<AppState>) {
-    let secs = poll_interval_secs(&app_state);
-    let timer_state = app_state.clone();
-    let id = glib::timeout_add_seconds_local(secs, move || {
-        let runtime = timer_state.tokio_runtime.clone();
-        let app_state = timer_state.clone();
-        glib::spawn_future_local(async move {
             let Some(pref) = preferred_region(&app_state) else {
                 if let Some(t) = app_state.tray.borrow().as_ref() {
                     t.update(None, "Select a region to track".to_string());
@@ -2622,29 +2657,20 @@ fn start_beacon_timer(app_state: Rc<AppState>) {
                 return;
             };
             let code = aws_code_for_region(&app_state.regions, &pref);
-            let ping_host = app_state
-                .regions
-                .get(&pref)
-                .and_then(|i| i.hosts.get(1).or_else(|| i.hosts.first()))
-                .cloned();
+            let online = code
+                .as_ref()
+                .and_then(|c| app_state.dbq_online.borrow().get(c).copied());
 
-            // Beacon is primary; fall back to the cached Dead by Queue map when inconclusive (None).
-            let mut online = match ping_host {
-                Some(h) => runtime
-                    .spawn(async move { beacon::is_fleet_online(&h, 1500).await })
+            let queue = if let Some(c) = code.clone() {
+                runtime
+                    .spawn(async move { dbq::get_queue(&c).await })
                     .await
-                    .unwrap_or(None),
-                None => None,
+                    .map(|(t, _)| t)
+                    .unwrap_or_default()
+            } else {
+                String::new()
             };
-            if online.is_none() {
-                online = code
-                    .as_ref()
-                    .and_then(|c| app_state.dbq_online.borrow().get(c).copied());
-            }
-            // Feed the live result back into the map so the latency list tracks it too.
-            if let (Some(o), Some(c)) = (online, code.clone()) {
-                app_state.dbq_online.borrow_mut().insert(c, o);
-            }
+            *app_state.last_queue_text.borrow_mut() = queue.clone();
 
             let short = pref
                 .split('(')
@@ -2656,7 +2682,6 @@ fn start_beacon_timer(app_state: Rc<AppState>) {
                 Some(false) => "OFFLINE",
                 None => "status unknown",
             };
-            let queue = app_state.last_queue_text.borrow().clone();
             if let Some(t) = app_state.tray.borrow().as_ref() {
                 t.update(online, format!("{}: {} | {}", short, state_str, queue));
             }
@@ -2678,7 +2703,7 @@ fn start_beacon_timer(app_state: Rc<AppState>) {
         });
         glib::ControlFlow::Continue
     });
-    *app_state.beacon_source.borrow_mut() = Some(id);
+    *app_state.dbq_source.borrow_mut() = Some(id);
 }
 
 fn is_region_blocked_by_hosts(
