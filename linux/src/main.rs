@@ -2220,6 +2220,8 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     // Block mode - using CheckButtons in radio mode
     let block_label = Label::new(Some("Gatekeep Options:"));
     block_label.set_halign(gtk4::Align::Start);
+    let app_label = Label::new(Some("App:"));
+    app_label.set_halign(gtk4::Align::Start);
     let rb_both = CheckButton::with_label("Block both (default)");
     let rb_ping = CheckButton::with_label("Block UDP ping beacon endpoints");
     let rb_service = CheckButton::with_label("Block service endpoints");
@@ -2268,7 +2270,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     let poll_spin = SpinButton::with_range(5.0, 600.0, 5.0);
     poll_spin.set_value(settings.poll_interval_seconds.max(5) as f64);
     poll_spin.set_tooltip_text(Some(
-        "How often the GameLift beacon and Dead by Queue status are checked. Higher is lighter on the network; lower notices a server coming online sooner. Default 60.",
+        "How often the Dead by Queue server status is checked. Higher is lighter on the network; lower notices a server coming online sooner. Default 30.",
     ));
     let poll_row = GtkBox::new(Orientation::Horizontal, 6);
     poll_row.append(&poll_label);
@@ -2284,10 +2286,12 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&rb_service);
     settings_box.append(&merge_check);
     settings_box.append(&hard_lock_check);
+    settings_box.append(&poll_row);
+    settings_box.append(&Separator::new(Orientation::Horizontal));
+    settings_box.append(&app_label);
     settings_box.append(&minimize_tray_check);
     settings_box.append(&notify_check);
     settings_box.append(&autostart_check);
-    settings_box.append(&poll_row);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2467,7 +2471,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             minimize_tray_check.set_active(true);
             notify_check.set_active(false);
             autostart_check.set_active(false);
-            poll_spin.set_value(60.0);
+            poll_spin.set_value(30.0);
 
             // Refresh the warning symbols in the list view
             refresh_warning_symbols(

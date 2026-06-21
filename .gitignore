@@ -3,4 +3,6 @@
 /.idea/
 /win/obj/
 /linux/target/
+/linux/make-your-choice-release
+/dist/
 /.claude/
