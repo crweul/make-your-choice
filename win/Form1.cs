@@ -184,6 +184,10 @@ namespace MakeYourChoice
         private TrafficSniffer _sniffer;
         private bool _snifferStarted;
         private AwsIpService _awsService;
+        // EXPERIMENT — learned DBD server IPs per region, fed by the sniffer, probed by the beacon.
+        private readonly ServerRegistry _serverRegistry = new();
+        // IPs we've already full-range-harvested this session (so we do it once per instance).
+        private readonly HashSet<string> _harvestedIps = new();
         private string _lastDetectedIp;
         private int _lastDetectedPort;
         private string _lastDetectedRegion;
@@ -408,7 +412,25 @@ namespace MakeYourChoice
                 return (true, "Hard region lock is off; firewall rules removed.");
             }
             var blockCodes = ComputeHardLockBlockCodes(allowedRegions);
-            return await FirewallManager.ApplyLockAsync(_awsService, blockCodes);
+            return await FirewallManager.ApplyLockAsync(_awsService, blockCodes, GetDbdExePath());
+        }
+
+        // Best-effort path to DeadByDaylight-Win64-Shipping.exe, derived from the configured game
+        // folder, so the hard lock can be scoped to the game only. Null if we can't find it (the
+        // firewall then falls back to a global block).
+        private string GetDbdExePath()
+        {
+            var root = _gamePath?.Trim();
+            if (string.IsNullOrEmpty(root)) return null;
+            try
+            {
+                // The user may point at the install root or directly at the exe.
+                if (root.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    return File.Exists(root) ? root : null;
+                var exe = Path.Combine(root, "DeadByDaylight", "Binaries", "Win64", "DeadByDaylight-Win64-Shipping.exe");
+                return File.Exists(exe) ? exe : null;
+            }
+            catch { return null; }
         }
 
         private class DarkModeColorTable : ProfessionalColorTable
@@ -694,9 +716,12 @@ namespace MakeYourChoice
             base.OnFormClosing(e);
         }
 
-        private async void OnTrafficDetected(string ip, int port)
+        private async void OnTrafficDetected(string ip, int port, int localPort)
         {
             if (this.Disposing || this.IsDisposed) return;
+            // Ignore the beacon's own probe packets (and the server replies to them) so an active probe
+            // never shows up as a real game connection or self-feeds the learned-server pool.
+            if (LiveProbe.IsBeaconLocalPort(localPort)) return;
 
             void ApplyUi(string regionName)
             {
@@ -786,6 +811,32 @@ namespace MakeYourChoice
                 // Live ground truth: we actually connected to a server in this region, so it's
                 // online right now — override DBQ's lagged data immediately.
                 MarkRegionOnlineFromConnection(regionName);
+                // EXPERIMENT — learn this server IP for the region so the active beacon can probe it
+                // later (even with the game closed) to tell if the fleet is still up.
+                try
+                {
+                    var regionCode = await Task.Run(() => _awsService.GetRegionCodeForIp(ip));
+                    if (!string.IsNullOrEmpty(regionCode))
+                    {
+                        _serverRegistry.Record(regionCode, ip, port);
+                        BeaconLog.Write($"LEARN  {regionCode}  {ip}:{port}  (known servers now: {_serverRegistry.TotalServers})");
+
+                        // Harvest the whole instance once: each GameLift box hosts several server
+                        // ports, so one connection can seed ~5 pool endpoints instead of 1.
+                        bool firstSeen;
+                        lock (_harvestedIps) firstSeen = _harvestedIps.Add(ip);
+                        if (firstSeen)
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                var ports = await LiveProbe.HarvestLivePortsAsync(ip);
+                                foreach (var p in ports) _serverRegistry.Record(regionCode, ip, p);
+                                BeaconLog.Write($"HARVEST {regionCode}  {ip} -> {ports.Count} live ports: {string.Join(",", ports)}");
+                            });
+                        }
+                    }
+                }
+                catch { /* learning is best-effort */ }
                 UpdateUi(regionName);
             }
             catch { /* Ignore if UI is gone */ }
@@ -2316,47 +2367,19 @@ namespace MakeYourChoice
             catch { return false; }
         }
 
-        private void BtnRevert_Click(object sender, EventArgs e)
+        private async void BtnRevert_Click(object sender, EventArgs e)
         {
-            try
+            // Untick every region in the UI so the list matches the cleared backend (the ticks used to
+            // persist visually — and across launches — even though nothing was applied).
+            if (_lv != null && !_lv.IsDisposed)
             {
-                File.Copy(HostsPath, HostsPath + ".bak", true);
-                WriteWrappedHostsSection(string.Empty);
-                try
-                {
-                    var psi = new ProcessStartInfo("ipconfig", "/flushdns")
-                    {
-                        CreateNoWindow = true,
-                        UseShellExecute = false
-                    };
-                    using (var proc = Process.Start(psi))
-                    {
-                        proc.WaitForExit();
-                    }
-                }
-                catch { /* ignore */ }
-                MessageBox.Show(
-                    "Cleared Make Your Choice entries. Your existing hosts lines were left untouched.",
-                    "Reverted",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                foreach (ListViewItem item in _lv.Items)
+                    if (item.Checked) item.Checked = false;
             }
-            catch (UnauthorizedAccessException)
-            {
-                MessageBox.Show(
-                    "Please run as Administrator to modify the hosts file.",
-                    "Permission Denied",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(
-                    ex.Message,
-                    "Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-            }
+            _savedSelection = new List<string>();
+            // Clear both backends (hosts entries AND any firewall hard lock) and persist the now-empty
+            // selection so it doesn't repopulate next launch.
+            await ClearAllRestrictionsAsync(true);
         }
 
         // Helper to write/update the wrapped hosts section (between SectionMarker lines)

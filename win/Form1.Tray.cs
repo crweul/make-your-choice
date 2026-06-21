@@ -35,6 +35,17 @@ namespace MakeYourChoice
         // Read by the latency list to show a ✓ / ⚠ next to unstable servers.
         private readonly Dictionary<string, bool> _dbqOnline = new();
 
+        // ── EXPERIMENT: active beacon ───────────────────────────────────────────────────────────
+        // Probe the real game-server IPs we learned from the sniffer (ServerRegistry) to detect
+        // fleet up/down in real time, going around DBQ's lag. A definite "Replied" from any learned
+        // server flips that region online immediately and is tagged as the status source. DBQ stays
+        // as the baseline/fallback. All probe results are written to BeaconLog for analysis.
+        // Flip to false to disable the active beacon (DBQ-only). Search: ExperimentActiveBeacon.
+        private static readonly bool ExperimentActiveBeacon = true;
+        // AWS region code -> where its current status came from ("beacon" | "live" | "dbq").
+        private readonly Dictionary<string, string> _statusSource = new();
+        private bool _beaconStartupLogged;
+
         private void SetupTray()
         {
             if (_tray != null) return; // already set up
@@ -85,7 +96,70 @@ namespace MakeYourChoice
         {
             if (string.IsNullOrEmpty(regionName)) return;
             var code = AwsCodeForRegion(regionName);
-            if (code != null) _dbqOnline[code] = true;
+            if (code != null) { _dbqOnline[code] = true; _statusSource[code] = "live"; }
+        }
+
+        // EXPERIMENT — for every unstable region we have learned servers for, actively probe them and
+        // override status to ONLINE the instant any server replies. This is the real-time beacon that
+        // goes around DBQ. We never force OFFLINE from a probe (a learned IP can be a recycled/dead
+        // instance even when the fleet is up elsewhere), so DBQ remains the source for the down case.
+        private async System.Threading.Tasks.Task RunActiveBeaconAsync()
+        {
+            if (!ExperimentActiveBeacon) return;
+            if (_regions == null) return;
+
+            // The region shown in the tray gets the extra port-sweep effort.
+            var preferredKey = GetPreferredRegionKey();
+            var preferredCode = preferredKey != null ? AwsCodeForRegion(preferredKey) : null;
+
+            // Distinct unstable region codes from the UI list.
+            var codes = new Dictionary<string, string>(); // code -> a region key (for logging)
+            foreach (var kv in _regions)
+            {
+                if (kv.Value.Stable) continue;
+                var code = AwsCodeForRegion(kv.Key);
+                if (code != null && !codes.ContainsKey(code)) codes[code] = kv.Key;
+            }
+
+            foreach (var entry in codes)
+            {
+                var code = entry.Key;
+                var candidates = _serverRegistry.GetCandidates(code, 64);
+                if (candidates.Count == 0)
+                {
+                    BeaconLog.Write($"BEACON {code}  no learned servers yet — connect once to seed");
+                    continue;
+                }
+
+                bool live = false;
+                string foundIp = null; int foundPort = 0;
+
+                // Replay the UE handshake to the whole known pool for this region, in parallel,
+                // stopping at the first confirmed DBD challenge. A reply is DEFINITIVE proof the fleet
+                // is up (only DBD's build answers with the magic) — faster & more accurate than DBQ.
+                //
+                // NOTE (evidence): a blind /24 subnet sweep was tried and dropped — live DBD servers
+                // are sparse and scattered across many subnets, so sweeping known /24s finds almost
+                // nothing new while flooding AWS with probes. Reliable cold-start instead comes from a
+                // LARGE accumulated pool (shipped seed + each session's learned IPs): when the fleet
+                // is up, some pool members are still alive. "No reply" is inconclusive (the pool may
+                // have fully churned), so we never force OFFLINE here — DBQ remains the down/unknown
+                // source.
+                var targets = candidates.Select(c => (c.Ip, c.Port)).ToList();
+                LiveProbe.SweepSummary hist;
+                try { hist = await LiveProbe.ProbeBatchAsync(targets, 1000, 32, stopOnLive: true); }
+                catch { hist = new LiveProbe.SweepSummary(); }
+                BeaconLog.Write($"BEACON {code}  pool({candidates.Count}) -> {hist}");
+                if (hist.AnyLive) { live = true; foundIp = hist.FirstLive.Ip; foundPort = hist.FirstLive.Port; }
+
+                if (live)
+                {
+                    _dbqOnline[code] = true;
+                    _statusSource[code] = "beacon";
+                    if (foundIp != null) _serverRegistry.Record(code, foundIp, foundPort); // refresh the live one
+                    BeaconLog.Write($"BEACON {code}  => ONLINE (UE handshake challenge, {foundIp}:{foundPort})");
+                }
+            }
         }
 
         // Poll Dead by Queue for real online/offline status + queue time, and update the tray.
@@ -93,13 +167,28 @@ namespace MakeYourChoice
         {
             if (_exiting || IsDisposed || _tray == null) return;
 
+            if (!_beaconStartupLogged)
+            {
+                _beaconStartupLogged = true;
+                BeaconLog.Write($"=== session start; active beacon={(ExperimentActiveBeacon ? "ON" : "off")}; " +
+                                $"known servers={_serverRegistry.TotalServers} across {_serverRegistry.RegionCount} regions ===");
+            }
+
             var status = await DbqClient.GetRegionStatusAsync();
             if (status.Count > 0)
             {
-                // DBQ is the baseline; a live sniffer connection can still override a region to
-                // online afterward via MarkRegionOnlineFromConnection.
-                foreach (var kv in status) _dbqOnline[kv.Key] = kv.Value;
+                // DBQ is the baseline; the active beacon and a live sniffer connection can still
+                // override a region to online afterward.
+                foreach (var kv in status)
+                {
+                    _dbqOnline[kv.Key] = kv.Value;
+                    if (!_statusSource.ContainsKey(kv.Key) || _statusSource[kv.Key] == "dbq")
+                        _statusSource[kv.Key] = "dbq";
+                }
             }
+
+            // EXPERIMENT — active beacon: probe learned servers and override to online in real time.
+            await RunActiveBeaconAsync();
 
             if (_exiting || IsDisposed || _tray == null) return;
 
@@ -146,7 +235,11 @@ namespace MakeYourChoice
             _prevPreferredOnline = online;
 
             var queue = string.IsNullOrEmpty(queueText) ? "" : "  -  " + queueText;
-            _tray.Text = Trunc($"{shortName}: {state}{queue}");
+            // EXPERIMENT — show which source produced this status (beacon = real-time active probe).
+            string src = "";
+            if (code != null && online == true && _statusSource.TryGetValue(code, out var s))
+                src = s == "beacon" ? "  [beacon]" : s == "live" ? "  [live]" : "  [dbq]";
+            _tray.Text = Trunc($"{shortName}: {state}{queue}{src}");
         }
 
         // The region the tray reports on: first checked unstable region, else first checked region.

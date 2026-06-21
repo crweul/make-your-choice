@@ -16,7 +16,8 @@ namespace MakeYourChoice
         private bool _stopped;
         private Thread _workerThread;
 
-        public event Action<string, int> TrafficDetected;
+        // (remoteIp, remotePort, localPort) — localPort lets the handler ignore our own beacon probes.
+        public event Action<string, int, int> TrafficDetected;
         public IPAddress ListeningIP { get; private set; }
 
         public void Start()
@@ -144,19 +145,24 @@ namespace MakeYourChoice
                     // Dest IP: Bytes 16-19
                     string remoteIp;
                     int remotePort;
+                    int localPort;
 
                     if (isSourceInRange)
                     {
+                        // Inbound from a server: remote = source, our local port = destination.
                         remoteIp = $"{buffer[12]}.{buffer[13]}.{buffer[14]}.{buffer[15]}";
                         remotePort = srcPort;
+                        localPort = dstPort;
                     }
                     else
                     {
+                        // Outbound to a server: remote = destination, our local port = source.
                         remoteIp = $"{buffer[16]}.{buffer[17]}.{buffer[18]}.{buffer[19]}";
                         remotePort = dstPort;
+                        localPort = srcPort;
                     }
 
-                    TrafficDetected?.Invoke(remoteIp, remotePort);
+                    TrafficDetected?.Invoke(remoteIp, remotePort, localPort);
                 }
             }
         }

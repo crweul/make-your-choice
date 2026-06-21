@@ -1,0 +1,32 @@
+# DBD known servers — shared address book shipped with the app.
+# Format: regionCode|ip|port|lastSeenUnix
+# The beacon replays the UE handshake to these endpoints to detect fleet state without the user
+# having to connect first. A reply carrying DBD's build magic = the fleet is up (zero false
+# positives). Reliability grows with pool size — extend this list from real connections over time.
+#
+# us-east-2 (Ohio) — confirmed live by direct handshake probe 2026-06-21 ~16:05 CDT.
+# Each live GameLift instance hosts several server ports; we list the ports observed answering.
+us-east-2|18.224.135.149|7778|1782070000
+us-east-2|18.224.135.149|7788|1782070000
+us-east-2|18.224.135.149|7789|1782070000
+us-east-2|18.224.135.149|7793|1782070000
+us-east-2|18.224.135.149|7797|1782070000
+us-east-2|3.145.143.168|7778|1782070000
+us-east-2|3.145.143.168|7783|1782070000
+us-east-2|3.145.143.168|7785|1782070000
+us-east-2|3.145.143.168|7792|1782070000
+us-east-2|3.145.143.168|7794|1782070000
+# Earlier-seen Ohio servers (may have churned, kept as extra pool members):
+us-east-2|18.225.57.244|7792|1782060000
+us-east-2|3.14.149.209|7797|1782062000
+us-east-2|18.191.192.95|7782|1782062000
+us-east-2|18.191.151.4|7796|1782062000
+#
+# eu-west-2 (London) — learned from a live session 2026-06-21; 3/7 confirmed live by probe ~17:55 CDT.
+eu-west-2|13.135.103.240|7789|1782081118
+eu-west-2|18.132.40.12|7782|1782081457
+eu-west-2|18.132.40.12|7795|1782081437
+eu-west-2|18.132.97.10|7793|1782081118
+eu-west-2|18.132.97.10|7778|1782081118
+eu-west-2|18.132.40.12|7791|1782081118
+eu-west-2|18.132.207.216|7796|1782081118
