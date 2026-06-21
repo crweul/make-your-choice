@@ -169,6 +169,10 @@ namespace MakeYourChoice
     /// </summary>
     public static class BeaconLog
     {
+        // Disabled for release (the beacon still works; it just doesn't write beacon-log.txt).
+        // Flip to true to re-enable the diagnostic log.
+        private static readonly bool Enabled = false;
+
         private static readonly object _lock = new();
         public static readonly string Path = System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -176,6 +180,7 @@ namespace MakeYourChoice
 
         public static void Write(string line)
         {
+            if (!Enabled) return;
             try
             {
                 lock (_lock)
