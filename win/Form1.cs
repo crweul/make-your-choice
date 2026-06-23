@@ -168,8 +168,9 @@ namespace MakeYourChoice
         // Notify (tray balloon) when the preferred server transitions offline -> online.
         private bool _notifyServerOnline = false;
         // Live server scanning: actively probe known game servers (the beacon) to detect real-time
-        // status. When off, the app sends no probe traffic and relies on Dead by Queue + connections.
-        private bool _liveServerScanning = true;
+        // status. Off by default (experimental); when off, the app sends no probe traffic and relies
+        // on Dead by Queue + connections.
+        private bool _liveServerScanning = false;
         // How often (seconds) the GameLift beacon probe and the Dead by Queue poll run.
         private int _pollIntervalSeconds = 30;
         // Start automatically at Windows logon (via a scheduled task so the elevated app launches
@@ -227,7 +228,7 @@ namespace MakeYourChoice
             public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
             public bool NotifyServerOnline { get; set; }
-            public bool LiveServerScanning { get; set; } = true;
+            public bool LiveServerScanning { get; set; } = false;
             public int PollIntervalSeconds { get; set; } = 30;
             public bool StartWithWindows { get; set; }
             public List<string> SelectedRegions { get; set; }
@@ -2721,7 +2722,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 1
+                RowCount = 2
             };
             var cbDarkMode = new CheckBox
             {
@@ -2795,6 +2796,7 @@ namespace MakeYourChoice
             pollPanel.Controls.Add(nudPollInterval);
 
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
+            tlpExperimental.Controls.Add(cbLiveScan, 0, 1);
             experimentalPanel.Controls.Add(tlpExperimental);
 
             // Server status poll interval now lives under Gatekeep Options.
@@ -2815,12 +2817,11 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 4
+                RowCount = 3
             };
             tlpApp.Controls.Add(cbMinimizeTray, 0, 0);
             tlpApp.Controls.Add(cbNotifyOnline, 0, 1);
             tlpApp.Controls.Add(cbStartup, 0, 2);
-            tlpApp.Controls.Add(cbLiveScan, 0, 3);
             appPanel.Controls.Add(tlpApp);
 
             // ── Game folder ────────────────────────────────────────────
@@ -2933,7 +2934,7 @@ namespace MakeYourChoice
                 cbMinimizeTray.Checked = true;
                 cbNotifyOnline.Checked = false;
                 cbStartup.Checked = false;
-                cbLiveScan.Checked = true;
+                cbLiveScan.Checked = false;
                 nudPollInterval.Value = 30;
             };
             buttonPanel.Controls.Add(btnOk);

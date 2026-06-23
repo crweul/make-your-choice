@@ -857,7 +857,7 @@ fn build_ui(app: &Application) {
                 // Harvest the instance's full port set once — active probing, only when live
                 // scanning is enabled.
                 let first_seen = harvested.lock().map(|mut h| h.insert(ip_string.clone())).unwrap_or(false);
-                let scanning = settings_h.lock().map(|s| s.live_server_scanning).unwrap_or(true);
+                let scanning = settings_h.lock().map(|s| s.live_server_scanning).unwrap_or(false);
                 if first_seen && scanning {
                     let ports = live_probe::harvest_live_ports(&ip_string).await;
                     for p in ports {
@@ -2292,6 +2292,8 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     block_label.set_halign(gtk4::Align::Start);
     let app_label = Label::new(Some("App:"));
     app_label.set_halign(gtk4::Align::Start);
+    let experimental_label = Label::new(Some("Experimental:"));
+    experimental_label.set_halign(gtk4::Align::Start);
     let rb_both = CheckButton::with_label("Block both (default)");
     let rb_ping = CheckButton::with_label("Block UDP ping beacon endpoints");
     let rb_service = CheckButton::with_label("Block service endpoints");
@@ -2368,6 +2370,8 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&minimize_tray_check);
     settings_box.append(&notify_check);
     settings_box.append(&autostart_check);
+    settings_box.append(&Separator::new(Orientation::Horizontal));
+    settings_box.append(&experimental_label);
     settings_box.append(&live_scan_check);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
@@ -2522,7 +2526,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.use_hard_lock = false;
             settings.minimize_to_tray = true;
             settings.notify_server_online = false;
-            settings.live_server_scanning = true;
+            settings.live_server_scanning = false;
             settings.poll_interval_seconds = 60;
             let autostart_was_on = settings.auto_start;
             settings.auto_start = false;
@@ -2550,7 +2554,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             minimize_tray_check.set_active(true);
             notify_check.set_active(false);
             autostart_check.set_active(false);
-            live_scan_check.set_active(true);
+            live_scan_check.set_active(false);
             poll_spin.set_value(30.0);
 
             // Refresh the warning symbols in the list view
@@ -2735,7 +2739,7 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
             // Active beacon: probe the known server pool for each unstable region. A confirmed UE
             // handshake challenge => online; otherwise unknown -> defer to DBQ. Skipped entirely when
             // the user turns off live server scanning (no probe traffic), clearing any prior verdicts.
-            let live_scanning = app_state.settings.lock().map(|s| s.live_server_scanning).unwrap_or(true);
+            let live_scanning = app_state.settings.lock().map(|s| s.live_server_scanning).unwrap_or(false);
             if !live_scanning {
                 app_state.beacon_state.borrow_mut().clear();
             } else {

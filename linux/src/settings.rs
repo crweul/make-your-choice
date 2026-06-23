@@ -30,9 +30,9 @@ pub struct UserSettings {
     // How often (seconds) the Dead by Queue server-status poll runs.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_seconds: u64,
-    // Live server scanning: actively probe known game servers (the beacon). When off, send no probe
-    // traffic and rely on Dead by Queue + servers we actually connect to.
-    #[serde(default = "default_true")]
+    // Live server scanning: actively probe known game servers (the beacon). Off by default
+    // (experimental); when off, send no probe traffic and rely on Dead by Queue + connections.
+    #[serde(default)]
     pub live_server_scanning: bool,
 }
 
@@ -59,7 +59,7 @@ impl Default for UserSettings {
             selected_regions: Vec::new(),
             auto_start: false,
             poll_interval_seconds: 30,
-            live_server_scanning: true,
+            live_server_scanning: false,
         }
     }
 }
