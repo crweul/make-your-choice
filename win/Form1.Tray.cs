@@ -46,18 +46,22 @@ namespace MakeYourChoice
         private readonly Dictionary<string, string> _statusSource = new();
         private bool _beaconStartupLogged;
 
-        // Status is RESOLVED fresh each poll from three inputs, in priority order:
-        //   live  — a real connection seen by the sniffer, but ONLY while recent (it must not stick
-        //           online forever after you stop playing)
-        //   beacon — the active handshake probe (online if a server replies; offline if a non-trivial
-        //            pool is entirely unreachable)
-        //   dbq    — Dead by Queue, the lagged fallback
+        // Status is RESOLVED fresh each poll. Priority:
+        //   live   — you're actually connected right now (sniffer), authoritative while recent
+        //   dbq-down (fresh) — Dead by Queue is the GUARANTEE: when its data is current and says a
+        //            region is down, it's down — even if the beacon still sees a few servers (those
+        //            are stragglers: the longest games still finishing that you can't matchmake to)
+        //   beacon — the active probe, best at catching a region COMING ONLINE early (speculative)
+        //   dbq    — Dead by Queue's value otherwise (incl. when its data is stale)
         // _dbqOnline/_statusSource below hold the RESOLVED result (read by the tray + latency list).
         private enum BeaconState { Unknown, Online } // a probe can only confirm ONLINE, never OFFLINE
         private readonly Dictionary<string, bool> _dbqRaw = new();         // DBQ's own /regions view
+        private long? _dbqDataUnix;                                        // DBQ's data refresh time (unix)
         private readonly Dictionary<string, DateTime> _lastConnection = new(); // UTC of last real connection
         private readonly Dictionary<string, BeaconState> _beaconResult = new();
         private const int LiveWindowSeconds = 120; // a connection counts as "live" for this long
+        // DBQ counts as "fresh enough to be the guarantee" if its data is at most this old.
+        private const int DbqFreshSeconds = 120;
 
         private void SetupTray()
         {
@@ -186,12 +190,20 @@ namespace MakeYourChoice
             }
         }
 
-        // Resolve each region's displayed status from the three inputs, in priority order:
-        // recent live connection > active beacon (online/offline) > Dead by Queue. Writes the result
-        // into _dbqOnline/_statusSource, which the tray and the latency list read.
+        // Resolve each region's displayed status. Priority:
+        //   1. recent live connection                -> ONLINE [live]   (you're on it right now)
+        //   2. DBQ fresh AND DBQ says down           -> OFFLINE [dbq]   (guarantee; cuts beacon
+        //      stragglers — the last long games still running that you can't matchmake to)
+        //   3. beacon says online                    -> ONLINE [beacon] (speculative; catches a
+        //      region coming online before DBQ does)
+        //   4. DBQ has a value (even if stale)       -> [dbq]
+        //   5. nothing knows                         -> unknown
         private void ResolveStatuses()
         {
             var now = DateTime.UtcNow;
+            long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            bool dbqFresh = _dbqDataUnix.HasValue && (nowUnix - _dbqDataUnix.Value) <= DbqFreshSeconds;
+
             var codes = new HashSet<string>(_dbqRaw.Keys);
             if (_regions != null)
                 foreach (var kv in _regions)
@@ -202,14 +214,22 @@ namespace MakeYourChoice
 
             foreach (var code in codes)
             {
+                bool hasDbq = _dbqRaw.TryGetValue(code, out var dbqVal);
+
                 if (_lastConnection.TryGetValue(code, out var t) && (now - t).TotalSeconds < LiveWindowSeconds)
                 {
                     _dbqOnline[code] = true; _statusSource[code] = "live"; continue;
                 }
+                // DBQ is the guarantee: a current "down" cuts the beacon's stragglers.
+                if (dbqFresh && hasDbq && !dbqVal)
+                {
+                    _dbqOnline[code] = false; _statusSource[code] = "dbq"; continue;
+                }
+                // Beacon leads the "coming online" case.
                 var bs = _beaconResult.TryGetValue(code, out var b) ? b : BeaconState.Unknown;
                 if (bs == BeaconState.Online) { _dbqOnline[code] = true; _statusSource[code] = "beacon"; continue; }
-                // No positive live/beacon signal -> defer entirely to DBQ (online or offline).
-                if (_dbqRaw.TryGetValue(code, out var d)) { _dbqOnline[code] = d; _statusSource[code] = "dbq"; continue; }
+                // Otherwise defer to DBQ's value (online, or a stale down).
+                if (hasDbq) { _dbqOnline[code] = dbqVal; _statusSource[code] = "dbq"; continue; }
                 _dbqOnline.Remove(code); _statusSource.Remove(code); // nothing knows -> unknown
             }
         }
@@ -226,9 +246,12 @@ namespace MakeYourChoice
                                 $"known servers={_serverRegistry.TotalServers} across {_serverRegistry.RegionCount} regions ===");
             }
 
-            var status = await DbqClient.GetRegionStatusAsync();
+            var (status, dataUnix) = await DbqClient.GetRegionStatusAsync();
             if (status.Count > 0)
-                foreach (var kv in status) _dbqRaw[kv.Key] = kv.Value; // DBQ's own view (fallback input)
+            {
+                foreach (var kv in status) _dbqRaw[kv.Key] = kv.Value; // DBQ's own view
+                _dbqDataUnix = dataUnix;                               // how current that view is
+            }
 
             // Active beacon: probe learned servers (fills _beaconResult per region).
             await RunActiveBeaconAsync();

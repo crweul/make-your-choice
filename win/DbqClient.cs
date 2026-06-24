@@ -32,14 +32,24 @@ namespace MakeYourChoice
             return c;
         }
 
-        /// <summary>AWS region code -> online(true)/offline(false). Empty dict on failure.</summary>
-        public static async Task<Dictionary<string, bool>> GetRegionStatusAsync()
+        /// <summary>
+        /// AWS region code -> online(true)/offline(false), plus the unix time (UTC seconds) of DBQ's
+        /// own last data refresh (its "lastupdated2" field) so callers can judge how current the data
+        /// is. dataUnix is null when the field is missing or on failure (empty dict).
+        /// </summary>
+        public static async Task<(Dictionary<string, bool> regions, long? dataUnix)> GetRegionStatusAsync()
         {
             var result = new Dictionary<string, bool>();
+            long? dataUnix = null;
             try
             {
                 using var stream = await _http.GetStreamAsync(RegionsUrl);
                 using var doc = await JsonDocument.ParseAsync(stream);
+                if (doc.RootElement.TryGetProperty("lastupdated2", out var lu)
+                    && lu.ValueKind == JsonValueKind.Number && lu.TryGetInt64(out var luv))
+                {
+                    dataUnix = luv;
+                }
                 if (doc.RootElement.TryGetProperty("regions", out var regions)
                     && regions.ValueKind == JsonValueKind.Object)
                 {
@@ -54,7 +64,7 @@ namespace MakeYourChoice
             {
                 // network/parse failure -> empty (callers keep prior state)
             }
-            return result;
+            return (result, dataUnix);
         }
 
         /// <summary>
