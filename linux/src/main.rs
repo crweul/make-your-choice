@@ -95,7 +95,8 @@ struct AppState {
     // three inputs in priority order: recent live connection > active beacon > Dead by Queue.
     dbq_online: RefCell<HashMap<String, bool>>,
     dbq_raw: RefCell<HashMap<String, bool>>,           // DBQ's own /regions view (fallback input)
-    beacon_state: RefCell<HashMap<String, i32>>,       // 1=online, 2=offline, else unknown
+    dbq_data_unix: RefCell<Option<i64>>,               // DBQ's data refresh time (unix), for freshness
+    beacon_state: RefCell<HashMap<String, i32>>,       // 1=online, else unknown
     status_source: RefCell<HashMap<String, String>>,   // "live" | "beacon" | "dbq"
     // UTC instant of the last real sniffer connection per region; "live" counts only while recent.
     last_connection: Arc<Mutex<HashMap<String, std::time::Instant>>>,
@@ -902,6 +903,7 @@ fn build_ui(app: &Application) {
         connection_dot: connection_dot,
         dbq_online: RefCell::new(HashMap::new()),
         dbq_raw: RefCell::new(HashMap::new()),
+        dbq_data_unix: RefCell::new(None),
         beacon_state: RefCell::new(HashMap::new()),
         status_source: RefCell::new(HashMap::new()),
         last_connection,
@@ -2725,7 +2727,7 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
         let runtime = timer_state.tokio_runtime.clone();
         let app_state = timer_state.clone();
         glib::spawn_future_local(async move {
-            let status = runtime
+            let (status, data_unix) = runtime
                 .spawn(async { dbq::get_region_status().await })
                 .await
                 .unwrap_or_default();
@@ -2734,6 +2736,7 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 for (k, v) in status {
                     raw.insert(k, v); // DBQ's own view (fallback input)
                 }
+                *app_state.dbq_data_unix.borrow_mut() = data_unix; // how current that view is
             }
 
             // Active beacon: probe the known server pool for each unstable region. A confirmed UE
@@ -2847,12 +2850,25 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
     *app_state.dbq_source.borrow_mut() = Some(id);
 }
 
-// Resolve each region's displayed status from three inputs, in priority order:
-// recent live connection > active beacon (online/offline) > Dead by Queue. Writes the result into
-// dbq_online/status_source, which the tray and latency list read.
+// Resolve each region's displayed status. Priority:
+//   1. recent live connection          -> ONLINE [live]
+//   2. DBQ fresh AND DBQ says down      -> OFFLINE [dbq]  (the guarantee; cuts beacon stragglers)
+//   3. beacon says online              -> ONLINE [beacon] (speculative; leads "coming online")
+//   4. DBQ value (incl. stale)         -> [dbq]
+//   5. nothing knows                   -> unknown
+// Writes the result into dbq_online/status_source, which the tray and latency list read.
 fn resolve_statuses(app_state: &Rc<AppState>) {
     const LIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+    const DBQ_FRESH_SECS: i64 = 120;
     let now = std::time::Instant::now();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // DBQ counts as "the guarantee" only while its data is current (within DBQ_FRESH_SECS).
+    let dbq_fresh = (*app_state.dbq_data_unix.borrow())
+        .map(|u| now_unix - u <= DBQ_FRESH_SECS)
+        .unwrap_or(false);
 
     let mut codes: HashSet<String> = HashSet::new();
     for k in app_state.dbq_raw.borrow().keys() {
@@ -2881,13 +2897,21 @@ fn resolve_statuses(app_state: &Rc<AppState>) {
             src_map.insert(code.clone(), "live".to_string());
             continue;
         }
+        let dbq_val = raw.get(&code).copied();
+        // DBQ is the guarantee: a current "down" cuts the beacon's stragglers.
+        if dbq_fresh && dbq_val == Some(false) {
+            online_map.insert(code.clone(), false);
+            src_map.insert(code.clone(), "dbq".to_string());
+            continue;
+        }
+        // Beacon leads the "coming online" case.
         if beacon.get(&code).copied().unwrap_or(0) == 1 {
             online_map.insert(code.clone(), true);
             src_map.insert(code.clone(), "beacon".to_string());
             continue;
         }
-        // No positive live/beacon signal -> defer entirely to DBQ (online or offline).
-        if let Some(v) = raw.get(&code).copied() {
+        // Otherwise defer to DBQ's value (online, or a stale down).
+        if let Some(v) = dbq_val {
             online_map.insert(code.clone(), v);
             src_map.insert(code.clone(), "dbq".to_string());
         } else {

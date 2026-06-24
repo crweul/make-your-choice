@@ -14,18 +14,20 @@ const REGIONS_URL: &str = "https://api.deadbyqueue.com/regions";
 const QUEUE_URL: &str = "https://api.deadbyqueue.com/queuetime?region=";
 const UA: &str = "make-your-choice";
 
-/// AWS region code -> online(true)/offline(false). Empty map on failure.
-pub async fn get_region_status() -> HashMap<String, bool> {
+/// AWS region code -> online(true)/offline(false), plus DBQ's own data-refresh time (unix UTC
+/// seconds, from "lastupdated2") so callers can judge freshness. Empty map + None on failure.
+pub async fn get_region_status() -> (HashMap<String, bool>, Option<i64>) {
     let mut out = HashMap::new();
     let client = reqwest::Client::new();
     let resp = match client.get(REGIONS_URL).header("User-Agent", UA).send().await {
         Ok(r) => r,
-        Err(_) => return out,
+        Err(_) => return (out, None),
     };
     let json: Value = match resp.json().await {
         Ok(j) => j,
-        Err(_) => return out,
+        Err(_) => return (out, None),
     };
+    let data_unix = json.get("lastupdated2").and_then(|v| v.as_i64());
     if let Some(regions) = json.get("regions").and_then(|r| r.as_object()) {
         for (code, v) in regions {
             if let Some(b) = v.as_bool() {
@@ -33,7 +35,7 @@ pub async fn get_region_status() -> HashMap<String, bool> {
             }
         }
     }
-    out
+    (out, data_unix)
 }
 
 /// Returns (raw text, killer queue minutes). minutes is 0 when under a minute, -1 if unknown.
