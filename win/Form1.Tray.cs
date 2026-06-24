@@ -322,9 +322,11 @@ namespace MakeYourChoice
             string queueText = "";
             if (!string.IsNullOrEmpty(code))
             {
-                var (qt, _) = await DbqClient.GetQueueAsync(code);
-                queueText = qt;
-                _lastQueueText = qt;
+                var (qt, min) = await DbqClient.GetQueueAsync(code);
+                // Only show an actual queue time. When a region is down DBQ's endpoint returns a
+                // verbose "no queue" paragraph (min = -1) — never put that in the tray.
+                queueText = min >= 0 ? qt : "";
+                _lastQueueText = queueText;
             }
             if (_exiting || IsDisposed || _tray == null) return;
 
