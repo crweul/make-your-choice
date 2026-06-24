@@ -229,6 +229,7 @@ namespace MakeYourChoice
             public bool MinimizeToTray { get; set; } = true;
             public bool NotifyServerOnline { get; set; }
             public bool LiveServerScanning { get; set; } = false;
+            public bool DebugBeacon { get; set; } = false;
             public int PollIntervalSeconds { get; set; } = 30;
             public bool StartWithWindows { get; set; }
             public List<string> SelectedRegions { get; set; }
@@ -259,6 +260,8 @@ namespace MakeYourChoice
                     _minimizeToTray = settings.MinimizeToTray;
                     _notifyServerOnline = settings.NotifyServerOnline;
                     _liveServerScanning = settings.LiveServerScanning;
+                    _debugBeacon = settings.DebugBeacon;
+                    BeaconLog.Enabled = _debugBeacon;
                     _pollIntervalSeconds = settings.PollIntervalSeconds >= 5 ? settings.PollIntervalSeconds : 60;
                     _startWithWindows = settings.StartWithWindows;
                     _savedSelection = settings.SelectedRegions ?? new List<string>();
@@ -294,6 +297,7 @@ namespace MakeYourChoice
                     MinimizeToTray = _minimizeToTray,
                     NotifyServerOnline = _notifyServerOnline,
                     LiveServerScanning = _liveServerScanning,
+                    DebugBeacon = _debugBeacon,
                     PollIntervalSeconds = _pollIntervalSeconds,
                     StartWithWindows = _startWithWindows,
                     SelectedRegions = GetCheckedRegionKeys(),
@@ -2722,7 +2726,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 2
+                RowCount = 3
             };
             var cbDarkMode = new CheckBox
             {
@@ -2767,6 +2771,15 @@ namespace MakeYourChoice
             };
             var toolTipLiveScan = new ToolTip();
             toolTipLiveScan.SetToolTip(cbLiveScan, "Actively ping known DBD game servers to detect in real time when an unstable region is really online (faster than Dead by Queue). Turn off to send no probe traffic and rely only on Dead by Queue plus servers you actually connect to.");
+            var cbDebug = new CheckBox
+            {
+                Text = "Debug (beacon log)",
+                AutoSize = true,
+                Checked = _debugBeacon,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipDebug = new ToolTip();
+            toolTipDebug.SetToolTip(cbDebug, "Write verbose beacon diagnostics to %LOCALAPPDATA%\\MakeYourChoice\\beacon-log.txt and show live-server count + Dead by Queue data age in the tray tooltip. For tuning.");
             var lblPoll = new Label
             {
                 Text = "Server status poll interval (sec):",
@@ -2797,6 +2810,7 @@ namespace MakeYourChoice
 
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
             tlpExperimental.Controls.Add(cbLiveScan, 0, 1);
+            tlpExperimental.Controls.Add(cbDebug, 0, 2);
             experimentalPanel.Controls.Add(tlpExperimental);
 
             // Server status poll interval now lives under Gatekeep Options.
@@ -2935,6 +2949,7 @@ namespace MakeYourChoice
                 cbNotifyOnline.Checked = false;
                 cbStartup.Checked = false;
                 cbLiveScan.Checked = false;
+                cbDebug.Checked = false;
                 nudPollInterval.Value = 30;
             };
             buttonPanel.Controls.Add(btnOk);
@@ -2989,6 +3004,8 @@ namespace MakeYourChoice
                 _minimizeToTray = cbMinimizeTray.Checked;
                 _notifyServerOnline = cbNotifyOnline.Checked;
                 _liveServerScanning = cbLiveScan.Checked;
+                _debugBeacon = cbDebug.Checked;
+                BeaconLog.Enabled = _debugBeacon;
                 _pollIntervalSeconds = (int)nudPollInterval.Value;
                 ApplyPollInterval();
                 bool startupChanged = _startWithWindows != cbStartup.Checked;
