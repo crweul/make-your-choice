@@ -97,6 +97,9 @@ struct AppState {
     dbq_raw: RefCell<HashMap<String, bool>>,           // DBQ's own /regions view (fallback input)
     dbq_data_unix: RefCell<Option<i64>>,               // DBQ's data refresh time (unix), for freshness
     beacon_state: RefCell<HashMap<String, i32>>,       // 1=online, else unknown
+    prev_live_count: RefCell<HashMap<String, i32>>,    // last poll's live count (edge detection)
+    dead_polls: RefCell<HashMap<String, i32>>,         // consecutive all-dead polls (backoff)
+    beacon_poll_count: RefCell<i64>,
     status_source: RefCell<HashMap<String, String>>,   // "live" | "beacon" | "dbq"
     // UTC instant of the last real sniffer connection per region; "live" counts only while recent.
     last_connection: Arc<Mutex<HashMap<String, std::time::Instant>>>,
@@ -109,6 +112,13 @@ struct AppState {
     prev_pref_online: RefCell<Option<bool>>,
     // glib source ID for the status poll timer, so it can be restarted when the interval changes.
     dbq_source: RefCell<Option<glib::SourceId>>,
+}
+
+fn now_unix_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 // AWS region code (e.g. "us-east-2") from a region's first GameLift host.
@@ -905,6 +915,9 @@ fn build_ui(app: &Application) {
         dbq_raw: RefCell::new(HashMap::new()),
         dbq_data_unix: RefCell::new(None),
         beacon_state: RefCell::new(HashMap::new()),
+        prev_live_count: RefCell::new(HashMap::new()),
+        dead_polls: RefCell::new(HashMap::new()),
+        beacon_poll_count: RefCell::new(0),
         status_source: RefCell::new(HashMap::new()),
         last_connection,
         last_queue_text: RefCell::new(String::new()),
@@ -2345,6 +2358,12 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
         "Actively ping known DBD game servers to detect in real time when an unstable region is really online (faster than Dead by Queue). Turn off to send no probe traffic and rely only on Dead by Queue plus servers you actually connect to.",
     ));
 
+    let debug_check = CheckButton::with_label("Debug (beacon log)");
+    debug_check.set_active(settings.debug_beacon);
+    debug_check.set_tooltip_text(Some(
+        "Verbose beacon diagnostics to stderr and live-server count + Dead by Queue data age in the tray tooltip. For tuning.",
+    ));
+
     let poll_label = Label::new(Some("Server status poll interval (seconds):"));
     poll_label.set_halign(gtk4::Align::Start);
     let poll_spin = SpinButton::with_range(5.0, 600.0, 5.0);
@@ -2375,6 +2394,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&Separator::new(Orientation::Horizontal));
     settings_box.append(&experimental_label);
     settings_box.append(&live_scan_check);
+    settings_box.append(&debug_check);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2474,6 +2494,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.minimize_to_tray = minimize_tray_check.is_active();
             settings.notify_server_online = notify_check.is_active();
             settings.live_server_scanning = live_scan_check.is_active();
+            settings.debug_beacon = debug_check.is_active();
             settings.poll_interval_seconds = poll_spin.value() as u64;
             let autostart_changed = settings.auto_start != autostart_check.is_active();
             settings.auto_start = autostart_check.is_active();
@@ -2529,6 +2550,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.minimize_to_tray = true;
             settings.notify_server_online = false;
             settings.live_server_scanning = false;
+            settings.debug_beacon = false;
             settings.poll_interval_seconds = 60;
             let autostart_was_on = settings.auto_start;
             settings.auto_start = false;
@@ -2557,6 +2579,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             notify_check.set_active(false);
             autostart_check.set_active(false);
             live_scan_check.set_active(false);
+            debug_check.set_active(false);
             poll_spin.set_value(30.0);
 
             // Refresh the warning symbols in the list view
@@ -2739,13 +2762,24 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 *app_state.dbq_data_unix.borrow_mut() = data_unix; // how current that view is
             }
 
-            // Active beacon: probe the known server pool for each unstable region. A confirmed UE
-            // handshake challenge => online; otherwise unknown -> defer to DBQ. Skipped entirely when
-            // the user turns off live server scanning (no probe traffic), clearing any prior verdicts.
-            let live_scanning = app_state.settings.lock().map(|s| s.live_server_scanning).unwrap_or(false);
+            // Active beacon (v2): confidence-scaled, deduped-by-instance, hot-set/backoff, jittered,
+            // with edge detection. Skipped (no probe traffic) when live scanning is off.
+            let (live_scanning, debug) = app_state
+                .settings
+                .lock()
+                .map(|s| (s.live_server_scanning, s.debug_beacon))
+                .unwrap_or((false, false));
             if !live_scanning {
                 app_state.beacon_state.borrow_mut().clear();
             } else {
+                let poll = {
+                    let mut c = app_state.beacon_poll_count.borrow_mut();
+                    *c += 1;
+                    *c
+                };
+                if poll % 40 == 1 {
+                    app_state.server_registry.prune(14); // keep the pool lean
+                }
                 let mut codes: Vec<String> = Vec::new();
                 for (name, info) in app_state.regions.iter() {
                     if info.stable {
@@ -2757,28 +2791,68 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                         }
                     }
                 }
+                let mut any_live = false;
                 for code in codes {
-                    let targets = app_state.server_registry.candidates(&code, 64);
-                    if targets.is_empty() {
-                        app_state.beacon_state.borrow_mut().insert(code.clone(), 0); // unknown
+                    let instances = app_state.server_registry.instances_ranked(&code, 48);
+                    let sample = instances.len();
+                    if sample == 0 {
+                        app_state.beacon_state.borrow_mut().insert(code.clone(), 0);
                         continue;
                     }
-                    let summary = runtime
-                        .spawn(async move { live_probe::probe_batch(targets, 1000, 32).await })
+                    // Confidence-scaled threshold by sample size.
+                    let needed = if sample <= 2 { 1 } else if sample <= 8 { 2 } else { 3 };
+                    let prev = app_state.prev_live_count.borrow().get(&code).copied().unwrap_or(-1);
+                    let dead = app_state.dead_polls.borrow().get(&code).copied().unwrap_or(0);
+                    // Hot set every poll; cold sweep every Nth poll, backing off the longer it's dead.
+                    let cold_every = 1 + dead.min(6) as i64;
+                    let sweep_cold = poll % cold_every == 0;
+                    let take = if sweep_cold { instances.len() } else { 8.min(instances.len()) };
+                    let targets: Vec<(String, u16)> =
+                        instances.iter().take(take).map(|i| (i.ip.clone(), i.port)).collect();
+
+                    let res = runtime
+                        .spawn(async move {
+                            live_probe::probe_for_live(targets, needed.max(1) as usize, 1000, 24, 400).await
+                        })
                         .await
                         .ok();
-                    // A probe can only confirm ONLINE. No reply is inconclusive (pool churned / region
-                    // scaled down / stale handshake) -> unknown, defer to DBQ. Never assert OFFLINE.
-                    let state = match summary {
-                        Some(s) if s.any_live => {
-                            if let Some((ip, port)) = s.first_live {
-                                app_state.server_registry.record(&code, &ip, port);
-                            }
-                            1 // online
-                        }
-                        _ => 0, // unknown
+
+                    let (live_count, live_eps, probed, replied, unreach, to) = match res {
+                        Some(r) => (r.live.len() as i32, r.live, r.probed, r.replied, r.port_unreach, r.timeout),
+                        None => (0, Vec::new(), 0, 0, 0, 0),
                     };
-                    app_state.beacon_state.borrow_mut().insert(code.clone(), state);
+                    for (ip, port) in &live_eps {
+                        app_state.server_registry.mark_live(&code, ip, *port);
+                    }
+                    if live_count > 0 {
+                        any_live = true;
+                    }
+                    let rising = prev >= 0 && live_count > prev;
+                    let eff_needed = if rising { (needed - 1).max(1) } else { needed };
+                    let online = live_count >= eff_needed;
+                    app_state.beacon_state.borrow_mut().insert(code.clone(), if online { 1 } else { 0 });
+                    app_state.prev_live_count.borrow_mut().insert(code.clone(), live_count);
+                    app_state
+                        .dead_polls
+                        .borrow_mut()
+                        .insert(code.clone(), if live_count == 0 { dead + 1 } else { 0 });
+
+                    if debug {
+                        let trend = if prev < 0 { "" } else if rising { " rising" } else if live_count < prev { " falling" } else { " flat" };
+                        eprintln!(
+                            "[beacon] {} sample={} probed={}({}) live={} need={}{} -> {} [{} rep, {} unreach, {} to]",
+                            code, sample, probed, if sweep_cold { "full" } else { "hot" },
+                            live_count, eff_needed, trend, if online { "ONLINE" } else { "unknown" },
+                            replied, unreach, to
+                        );
+                        if let Some((ip, port)) = live_eps.first().cloned() {
+                            let a2s = runtime.spawn(async move { live_probe::probe_a2s(&ip, port, 700).await }).await.ok();
+                            eprintln!("[beacon] {} A2S {:?}", code, a2s);
+                        }
+                    }
+                }
+                if any_live {
+                    app_state.server_registry.flush();
                 }
             }
 
@@ -2826,8 +2900,19 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 .and_then(|c| app_state.status_source.borrow().get(c).cloned())
                 .map(|s| format!(" [{}]", s))
                 .unwrap_or_default();
+            // Debug: append live-count + DBQ data age for tuning.
+            let dbg = if debug {
+                let live = code.as_ref().and_then(|c| app_state.prev_live_count.borrow().get(c).copied()).unwrap_or(0);
+                let age = match *app_state.dbq_data_unix.borrow() {
+                    Some(u) => format!("{}s", now_unix_i64() - u),
+                    None => "?".to_string(),
+                };
+                format!("  ({} live, DBQ {})", live, age)
+            } else {
+                String::new()
+            };
             if let Some(t) = app_state.tray.borrow().as_ref() {
-                t.update(online, format!("{}: {} | {}{}", short, state_str, queue, src));
+                t.update(online, format!("{}: {} | {}{}{}", short, state_str, queue, src, dbg));
             }
 
             // Notify on an offline -> online transition for the same preferred region.

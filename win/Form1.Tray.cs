@@ -63,6 +63,16 @@ namespace MakeYourChoice
         // DBQ counts as "fresh enough to be the guarantee" if its data is at most this old.
         private const int DbqFreshSeconds = 120;
 
+        // Beacon-v2 tuning + state.
+        private const int HotSetSize = 8;          // instances probed every poll
+        private const int MaxInstances = 48;       // cap distinct IPs probed (dedup keeps this small)
+        private const int ProbeJitterMs = 400;     // spread probes so it's not a burst scan
+        private readonly Dictionary<string, int> _prevLiveCount = new();  // last poll's live count
+        private readonly Dictionary<string, int> _deadPolls = new();      // consecutive all-dead polls (backoff)
+        private int _beaconPollCount;
+        // Debug toggle (Experimental): verbose beacon-log + live-count/data-age in the tray tooltip.
+        private bool _debugBeacon;
+
         private void SetupTray()
         {
             if (_tray != null) return; // already set up
@@ -133,62 +143,89 @@ namespace MakeYourChoice
             if (!_liveServerScanning) { _beaconResult.Clear(); return; }
             if (_regions == null) return;
 
-            // The region shown in the tray gets the extra port-sweep effort.
-            var preferredKey = GetPreferredRegionKey();
-            var preferredCode = preferredKey != null ? AwsCodeForRegion(preferredKey) : null;
+            _beaconPollCount++;
+            if (_beaconPollCount % 40 == 1) _serverRegistry.Prune(); // keep the pool lean periodically
 
             // Distinct unstable region codes from the UI list.
-            var codes = new Dictionary<string, string>(); // code -> a region key (for logging)
+            var codes = new HashSet<string>();
             foreach (var kv in _regions)
             {
                 if (kv.Value.Stable) continue;
                 var code = AwsCodeForRegion(kv.Key);
-                if (code != null && !codes.ContainsKey(code)) codes[code] = kv.Key;
+                if (code != null) codes.Add(code);
             }
 
-            foreach (var entry in codes)
+            bool anyLiveThisPoll = false;
+            foreach (var code in codes)
             {
-                var code = entry.Key;
-                var candidates = _serverRegistry.GetCandidates(code, 64);
-                if (candidates.Count == 0)
+                // Dedup to one (ip,port) per instance, newest/most-reliable first.
+                var instances = _serverRegistry.GetInstancesRanked(code, MaxInstances);
+                int sample = instances.Count;
+                if (sample == 0)
                 {
                     _beaconResult[code] = BeaconState.Unknown; // nothing to probe -> defer to DBQ
-                    BeaconLog.Write($"BEACON {code}  no learned servers yet — connect once to seed");
+                    if (_debugBeacon) BeaconLog.Write($"BEACON {code}  no learned servers yet");
                     continue;
                 }
 
-                // Replay the UE handshake to the whole known pool for this region, in parallel,
-                // stopping at the first confirmed DBD challenge. A reply is DEFINITIVE proof the fleet
-                // is up (only DBD's build answers with the magic) — faster & more accurate than DBQ.
-                //
-                // NOTE (evidence): a blind /24 subnet sweep was tried and dropped — live DBD servers
-                // are sparse and scattered across many subnets, so sweeping known /24s finds almost
-                // nothing new while flooding AWS with probes. Reliable cold-start instead comes from a
-                // LARGE accumulated pool (shipped seed + each session's learned IPs): when the fleet
-                // is up, some pool members are still alive. "No reply" is inconclusive (the pool may
-                // have fully churned), so we never force OFFLINE here — DBQ remains the down/unknown
-                // source.
-                var targets = candidates.Select(c => (c.Ip, c.Port)).ToList();
-                LiveProbe.SweepSummary hist;
-                try { hist = await LiveProbe.ProbeBatchAsync(targets, 1000, 32, stopOnLive: true); }
-                catch { hist = new LiveProbe.SweepSummary(); }
-                BeaconLog.Write($"BEACON {code}  pool({candidates.Count}) -> {hist}");
+                // Confidence-scaled threshold; a rising trend lowers the bar by 1 so the beacon leads
+                // the "coming online" case, while stragglers (below threshold) never count as up.
+                int needed = RequiredLive(sample);
+                int prev = _prevLiveCount.TryGetValue(code, out var pc) ? pc : -1;
 
-                if (hist.AnyLive)
+                // Hot/cold + backoff: always probe the hot set (recently-live IPs); sweep the cold set
+                // only every Nth poll, backing off the longer a region has been all-dead.
+                int dead = _deadPolls.TryGetValue(code, out var dp) ? dp : 0;
+                int coldEvery = 1 + Math.Min(dead, 6);               // 1 (fresh) .. 7 (long dead)
+                bool sweepCold = (_beaconPollCount % coldEvery) == 0;
+                var toProbe = (sweepCold ? instances : instances.Take(HotSetSize))
+                    .Select(i => (i.Ip, i.Port)).ToList();
+
+                LiveProbe.LiveResult res;
+                try { res = await LiveProbe.ProbeForLiveAsync(toProbe, Math.Max(1, needed), 1000, 24, ProbeJitterMs); }
+                catch { res = new LiveProbe.LiveResult(); }
+
+                int liveCount = res.LiveCount;
+                foreach (var (ip, port) in res.Live) _serverRegistry.MarkLive(code, ip, port);
+                if (liveCount > 0) anyLiveThisPoll = true;
+
+                bool rising = prev >= 0 && liveCount > prev;
+                int effNeeded = rising ? Math.Max(1, needed - 1) : needed;
+                bool online = liveCount >= effNeeded;
+
+                _beaconResult[code] = online ? BeaconState.Online : BeaconState.Unknown;
+                _prevLiveCount[code] = liveCount;
+                _deadPolls[code] = liveCount == 0 ? dead + 1 : 0;
+
+                if (_debugBeacon)
                 {
-                    _beaconResult[code] = BeaconState.Online;
-                    if (hist.FirstLive.Ip != null) _serverRegistry.Record(code, hist.FirstLive.Ip, hist.FirstLive.Port);
-                    BeaconLog.Write($"BEACON {code}  => ONLINE ({hist.FirstLive.Ip}:{hist.FirstLive.Port})");
-                }
-                else
-                {
-                    // No live reply is INCONCLUSIVE — the pool may have churned, the region may be
-                    // scaled down, or the handshake stale. We never assert OFFLINE from a probe; the
-                    // down/unknown case always defers to DBQ.
-                    _beaconResult[code] = BeaconState.Unknown;
+                    string trend = prev < 0 ? "" : rising ? " rising" : liveCount < prev ? " falling" : " flat";
+                    BeaconLog.Write($"BEACON {code}  sample={sample} probed={res.Probed}({(sweepCold ? "full" : "hot")}) " +
+                        $"live={liveCount} need={effNeeded}{trend} -> {(online ? "ONLINE" : "unknown")}  " +
+                        $"[{res.Replied} rep, {res.PortUnreach} unreach, {res.Timeout} to]");
+
+                    // A2S exploration: ask one live server for player info (distinguishes a busy
+                    // in-match server from an idle/ready one). Logged only; not used for the verdict yet.
+                    if (res.Live.Count > 0)
+                    {
+                        try
+                        {
+                            var (ip, port) = res.Live[0];
+                            var a2s = await LiveProbe.ProbeA2sAsync(ip, port, 700);
+                            BeaconLog.Write($"BEACON {code}  A2S {a2s}");
+                        }
+                        catch { }
+                    }
                 }
             }
+            if (anyLiveThisPoll) _serverRegistry.Flush(); // persist MarkLive updates
         }
+
+        // How many distinct live servers we require before calling a region ONLINE [beacon], scaled by
+        // how big a sample (distinct IPs) we have. A single responder in a large pool is a straggler
+        // (a long game still finishing); with a tiny pool we can't demand more than we have.
+        private static int RequiredLive(int sampleSize)
+            => sampleSize <= 2 ? 1 : sampleSize <= 8 ? 2 : 3;
 
         // Resolve each region's displayed status. Priority:
         //   1. recent live connection                -> ONLINE [live]   (you're on it right now)
@@ -309,7 +346,16 @@ namespace MakeYourChoice
             string src = "";
             if (code != null && online != null && _statusSource.TryGetValue(code, out var s))
                 src = "  [" + s + "]";
-            _tray.Text = Trunc($"{shortName}: {state}{queue}{src}");
+            string dbg = "";
+            if (_debugBeacon && code != null)
+            {
+                int live = _prevLiveCount.TryGetValue(code, out var lc) ? lc : 0;
+                string age = _dbqDataUnix.HasValue
+                    ? (DateTimeOffset.UtcNow.ToUnixTimeSeconds() - _dbqDataUnix.Value) + "s"
+                    : "?";
+                dbg = $"  ({live} live, DBQ {age})";
+            }
+            _tray.Text = Trunc($"{shortName}: {state}{queue}{src}{dbg}");
         }
 
         // The region the tray reports on: first checked unstable region, else first checked region.

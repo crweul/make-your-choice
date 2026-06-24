@@ -34,6 +34,9 @@ pub struct UserSettings {
     // (experimental); when off, send no probe traffic and rely on Dead by Queue + connections.
     #[serde(default)]
     pub live_server_scanning: bool,
+    // Debug: verbose beacon diagnostics (stderr) + live-count/DBQ-age in the tray tooltip, for tuning.
+    #[serde(default)]
+    pub debug_beacon: bool,
 }
 
 fn default_true() -> bool {
@@ -60,6 +63,7 @@ impl Default for UserSettings {
             auto_start: false,
             poll_interval_seconds: 30,
             live_server_scanning: false,
+            debug_beacon: false,
         }
     }
 }

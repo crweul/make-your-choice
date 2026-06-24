@@ -25,6 +25,21 @@ namespace MakeYourChoice
             public string Ip { get; set; }
             public int Port { get; set; }
             public long LastSeenUnix { get; set; }
+            public long LastLiveUnix { get; set; }   // last time a probe confirmed this endpoint live
+            // Recency used for ranking: the most recent of "seen in a real connection" or "probed live".
+            public long Recency => Math.Max(LastSeenUnix, LastLiveUnix);
+        }
+
+        // One game-server instance (IP) with its best representative port — the unit the beacon
+        // dedups to (probe one port per IP first).
+        public readonly struct Instance
+        {
+            public Instance(string ip, int port, long recency, long lastLive)
+            { Ip = ip; Port = port; Recency = recency; LastLiveUnix = lastLive; }
+            public string Ip { get; }
+            public int Port { get; }
+            public long Recency { get; }
+            public long LastLiveUnix { get; }
         }
 
         // Keep a generous history per region so a cold launch has many probe targets even as
@@ -51,14 +66,73 @@ namespace MakeYourChoice
         public void Record(string regionCode, string ip, int port)
         {
             if (string.IsNullOrEmpty(regionCode) || string.IsNullOrEmpty(ip)) return;
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             lock (_lock)
             {
                 if (!_byRegion.TryGetValue(regionCode, out var map))
                     _byRegion[regionCode] = map = new Dictionary<string, Entry>();
-                map[ip + ":" + port] = new Entry { Ip = ip, Port = port, LastSeenUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds() };
+                var key = ip + ":" + port;
+                if (map.TryGetValue(key, out var e)) e.LastSeenUnix = now; // preserve LastLiveUnix
+                else map[key] = new Entry { Ip = ip, Port = port, LastSeenUnix = now };
                 Trim(map);
             }
             Save();
+        }
+
+        /// <summary>Mark an endpoint confirmed-live (a probe got a DBD challenge). Powers reliability
+        /// ranking and self-pruning. Not persisted on every call — flushed opportunistically.</summary>
+        public void MarkLive(string regionCode, string ip, int port)
+        {
+            if (string.IsNullOrEmpty(regionCode) || string.IsNullOrEmpty(ip)) return;
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            lock (_lock)
+            {
+                if (!_byRegion.TryGetValue(regionCode, out var map))
+                    _byRegion[regionCode] = map = new Dictionary<string, Entry>();
+                var key = ip + ":" + port;
+                if (map.TryGetValue(key, out var e)) { e.LastLiveUnix = now; }
+                else map[key] = new Entry { Ip = ip, Port = port, LastSeenUnix = now, LastLiveUnix = now };
+            }
+        }
+
+        /// <summary>Persist current state (call after a batch of MarkLive updates).</summary>
+        public void Flush() => Save();
+
+        /// <summary>
+        /// Distinct instances (one per IP) for a region, newest-first by recency, with each IP's best
+        /// (most recent) port as the representative. This is what the beacon probes — one port per IP.
+        /// </summary>
+        public List<Instance> GetInstancesRanked(string regionCode, int max)
+        {
+            lock (_lock)
+            {
+                if (regionCode == null || !_byRegion.TryGetValue(regionCode, out var map))
+                    return new List<Instance>();
+                var byIp = new Dictionary<string, Entry>();
+                foreach (var e in map.Values)
+                    if (!byIp.TryGetValue(e.Ip, out var best) || e.Recency > best.Recency)
+                        byIp[e.Ip] = e;
+                return byIp.Values
+                    .OrderByDescending(e => e.Recency)
+                    .Take(max)
+                    .Select(e => new Instance(e.Ip, e.Port, e.Recency, e.LastLiveUnix))
+                    .ToList();
+            }
+        }
+
+        /// <summary>Drop endpoints that haven't been seen or confirmed live in maxAgeDays AND have
+        /// never been probed live — keeps the pool lean so we probe fewer, higher-quality targets.</summary>
+        public void Prune(int maxAgeDays = 14)
+        {
+            long cutoff = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - (long)maxAgeDays * 86400;
+            bool changed = false;
+            lock (_lock)
+            {
+                foreach (var map in _byRegion.Values)
+                    foreach (var e in map.Values.Where(e => e.Recency < cutoff && e.LastLiveUnix == 0).ToList())
+                    { map.Remove(e.Ip + ":" + e.Port); changed = true; }
+            }
+            if (changed) Save();
         }
 
         private static void Trim(Dictionary<string, Entry> map)
@@ -133,11 +207,12 @@ namespace MakeYourChoice
                         if (region.Length == 0 || ip.Length == 0) continue;
                         if (!int.TryParse(p[2], out var port)) continue;
                         if (!long.TryParse(p[3], out var seen)) seen = 0;
+                        long live = (p.Length >= 5 && long.TryParse(p[4], out var lv)) ? lv : 0; // optional 5th field
                         if (!_byRegion.TryGetValue(region, out var map))
                             _byRegion[region] = map = new Dictionary<string, Entry>();
                         var key = ip + ":" + port;
                         if (!map.TryGetValue(key, out var existing) || existing.LastSeenUnix < seen)
-                            map[key] = new Entry { Ip = ip, Port = port, LastSeenUnix = seen };
+                            map[key] = new Entry { Ip = ip, Port = port, LastSeenUnix = seen, LastLiveUnix = live };
                     }
                 }
             }
@@ -149,13 +224,14 @@ namespace MakeYourChoice
             try
             {
                 var sb = new System.Text.StringBuilder();
-                sb.AppendLine("# DBD known servers — regionCode|ip|port|lastSeenUnix");
+                sb.AppendLine("# DBD known servers — regionCode|ip|port|lastSeenUnix|lastLiveUnix");
                 lock (_lock)
                 {
                     foreach (var region in _byRegion)
                         foreach (var e in region.Value.Values)
                             sb.Append(region.Key).Append('|').Append(e.Ip).Append('|')
-                              .Append(e.Port).Append('|').Append(e.LastSeenUnix).Append('\n');
+                              .Append(e.Port).Append('|').Append(e.LastSeenUnix).Append('|')
+                              .Append(e.LastLiveUnix).Append('\n');
                 }
                 File.WriteAllText(_path, sb.ToString());
             }
@@ -169,9 +245,9 @@ namespace MakeYourChoice
     /// </summary>
     public static class BeaconLog
     {
-        // Disabled for release (the beacon still works; it just doesn't write beacon-log.txt).
-        // Flip to true to re-enable the diagnostic log.
-        private static readonly bool Enabled = false;
+        // Off by default; the Debug toggle (Experimental settings) turns it on at runtime so you can
+        // tune the beacon from beacon-log.txt without a special build.
+        public static volatile bool Enabled = false;
 
         private static readonly object _lock = new();
         public static readonly string Path = System.IO.Path.Combine(

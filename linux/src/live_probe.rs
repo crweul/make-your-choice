@@ -8,12 +8,14 @@
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 // A captured UE InitialConnect packet (Ohio capture, frame 415). Replayed verbatim; the stale
 // trailing client nonce does not stop the server issuing a fresh challenge.
@@ -235,6 +237,110 @@ pub async fn probe_batch(targets: Vec<(String, u16)>, timeout_ms: u64, concurren
         }
     }
     summary
+}
+
+pub struct LiveResult {
+    pub live: Vec<(String, u16)>,
+    pub probed: usize,
+    pub replied: usize,
+    pub port_unreach: usize,
+    pub timeout: usize,
+}
+
+fn cheap_hash(s: &str) -> u64 {
+    let mut h: u64 = 1469598103934665603; // FNV-1a
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+
+/// Probe instances (one (ip,port) each) with per-probe jitter and bounded concurrency, stopping the
+/// moment `needed` distinct DBD challenges are confirmed. Returns live endpoints + outcome counts.
+pub async fn probe_for_live(
+    targets: Vec<(String, u16)>,
+    needed: usize,
+    timeout_ms: u64,
+    concurrency: usize,
+    jitter_ms: u64,
+) -> LiveResult {
+    let mut res = LiveResult { live: Vec::new(), probed: 0, replied: 0, port_unreach: 0, timeout: 0 };
+    if targets.is_empty() {
+        return res;
+    }
+    let sem = Arc::new(Semaphore::new(concurrency.max(1)));
+    let done = Arc::new(AtomicBool::new(false));
+    let live_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(targets.len());
+    for (ip, port) in targets {
+        let sem = sem.clone();
+        let done = done.clone();
+        let live_count = live_count.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await;
+            if done.load(Ordering::Relaxed) {
+                return (None, Outcome::Error, true); // skipped after `needed` reached
+            }
+            if jitter_ms > 0 {
+                sleep(Duration::from_millis((cheap_hash(&ip) + port as u64) % jitter_ms)).await;
+            }
+            let r = probe_handshake(&ip, port, timeout_ms).await;
+            let live = r.is_live_server();
+            if live {
+                let n = live_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if n >= needed {
+                    done.store(true, Ordering::Relaxed);
+                }
+            }
+            (if live { Some((ip, port)) } else { None }, r.outcome, false)
+        }));
+    }
+    for h in handles {
+        if let Ok((live_ep, outcome, skipped)) = h.await {
+            if skipped {
+                continue;
+            }
+            res.probed += 1;
+            match outcome {
+                Outcome::Replied => res.replied += 1,
+                Outcome::PortUnreachable => res.port_unreach += 1,
+                Outcome::NoResponse => res.timeout += 1,
+                _ => {}
+            }
+            if let Some(ep) = live_ep {
+                res.live.push(ep);
+            }
+        }
+    }
+    res
+}
+
+/// Steam A2S_INFO probe (exploration): if DBD answers it, the reply distinguishes a busy in-match
+/// server from an idle/ready one. Returns Replied (with magic=true on a valid info reply).
+pub async fn probe_a2s(ip: &str, port: u16, timeout_ms: u64) -> Outcome {
+    let mut payload: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x54];
+    payload.extend_from_slice(b"Source Engine Query\0");
+    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(_) => return Outcome::Error,
+    };
+    if let Ok(local) = sock.local_addr() {
+        mark_beacon_port(local.port());
+    }
+    if sock.connect((ip, port)).await.is_err() {
+        return Outcome::Error;
+    }
+    if sock.send(&payload).await.is_err() {
+        return Outcome::Error;
+    }
+    let mut buf = [0u8; 2048];
+    match timeout(Duration::from_millis(timeout_ms), sock.recv(&mut buf)).await {
+        Ok(Ok(_)) => Outcome::Replied,
+        Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => Outcome::PortUnreachable,
+        Ok(Err(_)) => Outcome::Error,
+        Err(_) => Outcome::NoResponse,
+    }
 }
 
 /// Handshake every port in 7777..=7820 on one IP; return the ports that answer as a live DBD server.

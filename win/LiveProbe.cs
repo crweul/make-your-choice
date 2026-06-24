@@ -321,6 +321,60 @@ namespace MakeYourChoice
             return s;
         }
 
+        public sealed class LiveResult
+        {
+            public readonly List<(string ip, int port)> Live = new();
+            public int Probed, Replied, PortUnreach, Timeout;
+            public int LiveCount => Live.Count;
+        }
+
+        /// <summary>
+        /// Probe instances (one (ip,port) each) with per-probe jitter and bounded concurrency, stopping
+        /// the moment `needed` distinct DBD challenges are confirmed. Returns the live endpoints plus
+        /// outcome counts (for the debug/tuning log). Jitter spreads the packets so it reads less like
+        /// a burst scan.
+        /// </summary>
+        public static async Task<LiveResult> ProbeForLiveAsync(IReadOnlyList<(string ip, int port)> targets,
+            int needed, int timeoutMs, int maxConcurrent, int jitterMs)
+        {
+            var res = new LiveResult();
+            if (targets.Count == 0) return res;
+            using var cts = new CancellationTokenSource();
+            var opts = new ParallelOptions { MaxDegreeOfParallelism = maxConcurrent, CancellationToken = cts.Token };
+            var sync = new object();
+            try
+            {
+                await Parallel.ForEachAsync(targets, opts, async (t, _) =>
+                {
+                    if (jitterMs > 0)
+                    {
+                        try { await Task.Delay(Random.Shared.Next(jitterMs), cts.Token).ConfigureAwait(false); }
+                        catch { return; }
+                    }
+                    var r = await ProbeUdpAsync("UE-HS", ActiveHandshake(), t.ip, t.port, timeoutMs).ConfigureAwait(false);
+                    bool reached = false;
+                    lock (sync)
+                    {
+                        res.Probed++;
+                        switch (r.Outcome)
+                        {
+                            case Outcome.Replied: res.Replied++; break;
+                            case Outcome.PortUnreachable: res.PortUnreach++; break;
+                            case Outcome.NoResponse: res.Timeout++; break;
+                        }
+                        if (r.IsLiveServer)
+                        {
+                            res.Live.Add((t.ip, t.port));
+                            if (res.Live.Count >= needed) reached = true;
+                        }
+                    }
+                    if (reached) { try { cts.Cancel(); } catch { } }
+                }).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { /* reached `needed` early */ }
+            return res;
+        }
+
         /// <summary>
         /// Sweep a /24 (prefix like "18.225.57") across the given ports with the UE handshake, to find
         /// a live DBD server even when GameLift has churned the exact IPs we'd previously seen.
