@@ -349,6 +349,42 @@ namespace MakeYourChoice
             catch { /* ignore */ }
         }
 
+        // If autostart is enabled but the scheduled task points at a different (stale) exe path than
+        // the one running now, re-register it at the current path. Fixes the common portable-app case
+        // where the exe is renamed/moved between updates, leaving the logon task pointing at a file
+        // that no longer exists.
+        private static void RefreshAutoStartIfStale()
+        {
+            try
+            {
+                var exe = Environment.ProcessPath;
+                if (string.IsNullOrEmpty(exe)) return;
+                var psi = new ProcessStartInfo("schtasks")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                psi.ArgumentList.Add("/query");
+                psi.ArgumentList.Add("/tn"); psi.ArgumentList.Add(AutoStartTaskName);
+                psi.ArgumentList.Add("/fo"); psi.ArgumentList.Add("list");
+                psi.ArgumentList.Add("/v");
+                string output;
+                using (var p = Process.Start(psi))
+                {
+                    if (p == null) return;
+                    output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit();
+                    if (p.ExitCode != 0) { SetAutoStart(true); return; } // task missing -> create it
+                }
+                // The registered command must reference the exe running right now; if not, re-point it.
+                if (output.IndexOf(exe, StringComparison.OrdinalIgnoreCase) < 0)
+                    SetAutoStart(true);
+            }
+            catch { /* best effort */ }
+        }
+
         // Region keys currently ticked in the main list (falls back to the saved set if the list
         // isn't built yet). Also refreshes _savedSelection so it stays current.
         private List<string> GetCheckedRegionKeys()
@@ -673,6 +709,12 @@ namespace MakeYourChoice
                 _ = CheckForUpdatesAsync(true);
             };
             LoadSettings();
+            // Self-heal autostart: a portable, version-named exe gets moved/renamed between updates,
+            // which leaves the scheduled task pointing at a stale path that no longer exists (so it
+            // silently fails at logon). If autostart is enabled, re-point the task at THIS exe on
+            // every launch. Background + only when the registered path differs, to avoid needless work.
+            if (_startWithWindows)
+                System.Threading.Tasks.Task.Run(() => RefreshAutoStartIfStale());
             ApplyTheme();
             // Show update message if version changed
             if (!string.Equals(CurrentVersion, _lastLaunchedVersion, StringComparison.OrdinalIgnoreCase))
