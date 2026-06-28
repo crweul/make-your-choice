@@ -221,11 +221,13 @@ namespace MakeYourChoice
             if (anyLiveThisPoll) _serverRegistry.Flush(); // persist MarkLive updates
         }
 
-        // How many distinct live servers we require before calling a region ONLINE [beacon], scaled by
-        // how big a sample (distinct IPs) we have. A single responder in a large pool is a straggler
-        // (a long game still finishing); with a tiny pool we can't demand more than we have.
+        // How many distinct live servers we require before calling a region ONLINE [beacon]. DBQ's
+        // fresh "down" already vetoes stragglers ahead of the beacon (see ResolveStatuses), so the
+        // bar here is deliberately low: the beacon's job is to catch a region COMING ONLINE, which in
+        // the captured logs means as few as 1-2 live (London routinely shows up on a single responder;
+        // Ohio peaks ~10). A rising edge lowers this by 1, so even a large pool can fire on first hit.
         private static int RequiredLive(int sampleSize)
-            => sampleSize <= 2 ? 1 : sampleSize <= 8 ? 2 : 3;
+            => sampleSize <= 2 ? 1 : 2;
 
         // Resolve each region's displayed status. Priority:
         //   1. recent live connection                -> ONLINE [live]   (you're on it right now)
@@ -280,7 +282,8 @@ namespace MakeYourChoice
             {
                 _beaconStartupLogged = true;
                 BeaconLog.Write($"=== session start; active beacon={(ExperimentActiveBeacon ? "ON" : "off")}; " +
-                                $"known servers={_serverRegistry.TotalServers} across {_serverRegistry.RegionCount} regions ===");
+                                $"known servers={_serverRegistry.TotalServers} across {_serverRegistry.RegionCount} regions; " +
+                                $"handshake magic={LiveProbe.ActiveMagicHex()} ({(LiveProbe.UsingLearnedHandshake ? "learned" : "bootstrap")}) ===");
             }
 
             var (status, dataUnix) = await DbqClient.GetRegionStatusAsync();

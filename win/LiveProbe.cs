@@ -73,6 +73,15 @@ namespace MakeYourChoice
             return hs.Length >= 9 ? new[] { hs[5], hs[6], hs[7], hs[8] } : new byte[] { 0xc9, 0x1e, 0xf8, 0x11 };
         }
 
+        /// <summary>Build magic (bytes 5..8 of the active handshake) as hex — for the diagnostic log,
+        /// so a stale magic (DBD patched without a fresh capture) is visible as the cause of probes
+        /// that all time out even when the region is up.</summary>
+        public static string ActiveMagicHex() => BitConverter.ToString(ActiveMagic()).Replace("-", "");
+
+        /// <summary>True if we're probing with a handshake learned from live game traffic (vs the
+        /// shipped bootstrap). A bootstrap magic after a DBD netcode patch is the likely all-timeout cause.</summary>
+        public static bool UsingLearnedHandshake { get { lock (_hsLock) return _learnedHandshake != null; } }
+
         /// <summary>
         /// Adopt a UE InitialConnect handshake captured live from the game's own traffic as the probe
         /// template. If the magic differs from what we had, that's a netcode patch — we log it and

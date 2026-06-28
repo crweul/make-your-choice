@@ -107,6 +107,17 @@ fn active_magic() -> [u8; 4] {
     }
 }
 
+/// Build magic as hex (for the diagnostic log) — a stale bootstrap magic after a DBD netcode patch
+/// is the likely cause of probes that all time out even when the region is up.
+pub fn active_magic_hex() -> String {
+    active_magic().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// True if probing with a handshake learned from live game traffic (vs the shipped bootstrap).
+pub fn using_learned_handshake() -> bool {
+    learned_handshake().lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
 /// Adopt a UE InitialConnect handshake captured live from the game's own traffic as the probe
 /// template. If the magic differs from what we had, that's a netcode patch — log it and auto-update
 /// (no manual recapture needed). Persisted so it survives restarts.

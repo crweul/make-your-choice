@@ -2780,6 +2780,15 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 if poll % 40 == 1 {
                     app_state.server_registry.prune(14); // keep the pool lean
                 }
+                if debug && poll == 1 {
+                    // Surface the build magic so a stale bootstrap (DBD patched, no fresh capture) is
+                    // visible as the cause of all-timeout probes rather than mistaken for "region down".
+                    eprintln!(
+                        "[beacon] handshake magic={} ({})",
+                        live_probe::active_magic_hex(),
+                        if live_probe::using_learned_handshake() { "learned" } else { "bootstrap" }
+                    );
+                }
                 let mut codes: Vec<String> = Vec::new();
                 for (name, info) in app_state.regions.iter() {
                     if info.stable {
@@ -2799,8 +2808,10 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                         app_state.beacon_state.borrow_mut().insert(code.clone(), 0);
                         continue;
                     }
-                    // Confidence-scaled threshold by sample size.
-                    let needed = if sample <= 2 { 1 } else if sample <= 8 { 2 } else { 3 };
+                    // Low bar by design: DBQ's fresh "down" vetoes stragglers ahead of the beacon
+                    // (resolve_statuses), so this only needs to catch a region coming online — which
+                    // the captured logs show as as few as 1-2 live. A rising edge drops it by 1 more.
+                    let needed = if sample <= 2 { 1 } else { 2 };
                     let prev = app_state.prev_live_count.borrow().get(&code).copied().unwrap_or(-1);
                     let dead = app_state.dead_polls.borrow().get(&code).copied().unwrap_or(0);
                     // Hot set every poll; cold sweep every Nth poll, backing off the longer it's dead.
