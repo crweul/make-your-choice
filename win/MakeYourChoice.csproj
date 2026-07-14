@@ -36,6 +36,9 @@
         <Content Include="icon.ico">
             <CopyToOutputDirectory>Always</CopyToOutputDirectory>
         </Content>
+        <Content Include="servers-seed.txt">
+            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
         <Content Include="..\shared\star.svg">
             <Link>star.svg</Link>
             <CopyToOutputDirectory>Always</CopyToOutputDirectory>

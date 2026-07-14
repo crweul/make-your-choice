@@ -16,7 +16,11 @@ namespace MakeYourChoice
         private bool _stopped;
         private Thread _workerThread;
 
-        public event Action<string, int> TrafficDetected;
+        // (remoteIp, remotePort, localPort) — localPort lets the handler ignore our own beacon probes.
+        public event Action<string, int, int> TrafficDetected;
+        // Raised with the raw payload of the game's UE InitialConnect handshake (for auto-updating
+        // the beacon's probe template to the current build).
+        public event Action<byte[]> HandshakeCaptured;
         public IPAddress ListeningIP { get; private set; }
 
         public void Start()
@@ -144,19 +148,41 @@ namespace MakeYourChoice
                     // Dest IP: Bytes 16-19
                     string remoteIp;
                     int remotePort;
+                    int localPort;
 
                     if (isSourceInRange)
                     {
+                        // Inbound from a server: remote = source, our local port = destination.
                         remoteIp = $"{buffer[12]}.{buffer[13]}.{buffer[14]}.{buffer[15]}";
                         remotePort = srcPort;
+                        localPort = dstPort;
                     }
                     else
                     {
+                        // Outbound to a server: remote = destination, our local port = source.
                         remoteIp = $"{buffer[16]}.{buffer[17]}.{buffer[18]}.{buffer[19]}";
                         remotePort = dstPort;
+                        localPort = srcPort;
                     }
 
-                    TrafficDetected?.Invoke(remoteIp, remotePort);
+                    TrafficDetected?.Invoke(remoteIp, remotePort, localPort);
+
+                    // Capture the game's own UE InitialConnect handshake from a real outbound packet
+                    // (prefix B8 01 02 80 00), so the beacon's probe template auto-updates to the
+                    // current build's magic — surviving DBD patches. Skip our own beacon probes.
+                    if (isDestInRange && !LiveProbe.IsBeaconLocalPort(localPort))
+                    {
+                        int p0 = ipHeaderLength + 8;            // UDP payload start
+                        int plen = length - p0;
+                        if (plen >= 20 && plen <= 100
+                            && buffer[p0] == 0xB8 && buffer[p0 + 1] == 0x01 && buffer[p0 + 2] == 0x02
+                            && buffer[p0 + 3] == 0x80 && buffer[p0 + 4] == 0x00)
+                        {
+                            var payload = new byte[plen];
+                            Array.Copy(buffer, p0, payload, 0, plen);
+                            HandshakeCaptured?.Invoke(payload);
+                        }
+                    }
                 }
             }
         }

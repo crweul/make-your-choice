@@ -1,3 +1,9 @@
-version: v2.8
+version: v2.9-b
 notes:
-  - Fixed potential crash when launching MakeYourChoice while in game on Windows.
+  - "Hard Region Lock (firewall)."
+  - "Live server status."
+  - "Minimize to system tray."
+  - "Notifications when your preferred server comes online."
+  - "Configurable status poll interval."
+  - "Your region selection is remembered across launches."
+  - "Backend consistency when resetting to default, applying with no boxes selected, or changing firewall/merge settings."

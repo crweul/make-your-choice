@@ -12,8 +12,8 @@ pub struct TrafficSniffer {
 }
 
 impl TrafficSniffer {
-    pub fn new<F>(callback: F) -> Self 
-    where F: Fn(String, u16) + Send + 'static + Sync
+    pub fn new<F>(callback: F) -> Self
+    where F: Fn(String, u16, u16) + Send + 'static + Sync
     {
         let running = Arc::new(AtomicBool::new(true));
         
@@ -29,7 +29,7 @@ impl TrafficSniffer {
     }
 
     fn sniff<F>(running: Arc<AtomicBool>, callback: F)
-    where F: Fn(String, u16)
+    where F: Fn(String, u16, u16)
     {
         let interfaces = datalink::interfaces();
         let interface = interfaces
@@ -78,7 +78,27 @@ impl TrafficSniffer {
                                             header.get_destination()
                                         };
                                         let port = if src_in_range { src_port } else { dst_port };
-                                        callback(remote_ip.to_string(), port);
+                                        // Our local port is the side NOT in the game range.
+                                        let local_port = if src_in_range { dst_port } else { src_port };
+                                        callback(remote_ip.to_string(), port, local_port);
+
+                                        // Capture the game's own UE InitialConnect handshake (prefix
+                                        // B8 01 02 80 00) from a real outbound packet, so the beacon's
+                                        // probe template auto-updates to the current build's magic.
+                                        // Skip our own beacon probes.
+                                        if dst_in_range && !crate::live_probe::is_beacon_local_port(local_port) {
+                                            let pl = udp.payload();
+                                            if pl.len() >= 20
+                                                && pl.len() <= 100
+                                                && pl[0] == 0xB8
+                                                && pl[1] == 0x01
+                                                && pl[2] == 0x02
+                                                && pl[3] == 0x80
+                                                && pl[4] == 0x00
+                                            {
+                                                crate::live_probe::set_learned_handshake(pl);
+                                            }
+                                        }
                                     }
                                 }
                             }

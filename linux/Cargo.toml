@@ -1,6 +1,6 @@
 [package]
 name = "make-your-choice"
-version = "2.3.0"
+version = "3.0.0"
 edition = "2021"
 authors = ["lawliet"]
 
@@ -25,3 +25,4 @@ pango = "0.20"
 open = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
 pnet = "0.35.0"
+ksni = "0.2"

@@ -15,18 +15,36 @@ namespace MakeYourChoice
 
         private readonly struct AwsCidr
         {
-            public AwsCidr(uint network, uint mask, int prefixLength, string region)
+            public AwsCidr(uint network, uint mask, int prefixLength, string region, string prefix)
             {
                 Network = network;
                 Mask = mask;
                 PrefixLength = prefixLength;
                 Region = region;
+                Prefix = prefix;
             }
 
             public uint Network { get; }
             public uint Mask { get; }
             public int PrefixLength { get; }
             public string Region { get; }
+            public string Prefix { get; }
+        }
+
+        /// <summary>
+        /// Returns the set of CIDR strings (e.g. "3.5.0.0/16") belonging to the given AWS region
+        /// codes (e.g. "us-east-1"). Used to firewall-block a region's game-server data plane.
+        /// </summary>
+        public async Task<List<string>> GetCidrStringsForRegionsAsync(ISet<string> regionCodes)
+        {
+            await RefreshRangesAsync().ConfigureAwait(false);
+            var set = new HashSet<string>();
+            foreach (var c in _cidrs)
+            {
+                if (c.Region != null && c.Prefix != null && regionCodes.Contains(c.Region))
+                    set.Add(c.Prefix);
+            }
+            return new List<string>(set);
         }
 
         private async Task<List<AwsCidr>> FetchRangesAsync()
@@ -59,7 +77,7 @@ namespace MakeYourChoice
 
                         if (TryParseIpv4Cidr(ipPrefix, out var network, out var mask, out var prefixLength))
                         {
-                            list.Add(new AwsCidr(network, mask, prefixLength, region));
+                            list.Add(new AwsCidr(network, mask, prefixLength, region, ipPrefix));
                         }
                     }
                 }
@@ -101,6 +119,27 @@ namespace MakeYourChoice
                 }
             }
             return best.HasValue ? GetPrettyRegionName(best.Value.Region) : null;
+        }
+
+        /// <summary>Raw AWS region code (e.g. "us-east-2") for an IP, or null. Used by the beacon
+        /// to key learned servers by region.</summary>
+        public string GetRegionCodeForIp(string ipAddress)
+        {
+            RefreshRangesAsync().GetAwaiter().GetResult();
+            if (_cidrs.Count == 0) return null;
+            if (!IPAddress.TryParse(ipAddress, out var ip)) return null;
+            var ipBytes = ip.GetAddressBytes();
+            if (ipBytes.Length != 4) return null;
+            uint ipVal = (uint)((ipBytes[0] << 24) | (ipBytes[1] << 16) | (ipBytes[2] << 8) | ipBytes[3]);
+            AwsCidr? best = null;
+            foreach (var cidr in _cidrs)
+            {
+                if ((ipVal & cidr.Mask) == cidr.Network)
+                {
+                    if (best == null || cidr.PrefixLength > best.Value.PrefixLength) best = cidr;
+                }
+            }
+            return best?.Region;
         }
 
         private async Task RefreshRangesAsync()
