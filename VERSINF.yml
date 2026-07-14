@@ -1,8 +1,8 @@
-version: v3.0
+version: v2.9-b
 notes:
-  - "Hard Region Lock (firewall): optionally block every region you didn't pick so DBD can't fall back to N. Virginia."
-  - "Live server status: real online/offline for the unstable servers (Ohio, Canada, London), shown as a check/warning in the list."
-  - "System tray: minimizes to a single icon with a green/red status bubble; hover shows status and queue time."
+  - "Hard Region Lock (firewall)."
+  - "Live server status."
+  - "Minimize to system tray."
   - "Notifications when your preferred server comes online."
   - "Configurable status poll interval."
   - "Your region selection is remembered across launches."
