@@ -24,10 +24,13 @@ namespace MakeYourChoice
     {
         public const string RuleGroup = "MakeYourChoice RegionLock";
         private const string BlockedUdpPorts = "7770-7820";
-        private const int ChunkSize = 1000; // CIDRs per firewall rule
+        // CIDRs per firewall rule. Windows Firewall's New-NetFirewallRule fails ("The system cannot
+        // find the file specified", Win32 error 2) when a single rule's -RemoteAddress list gets too
+        // large (~1000+). A few hundred is reliable, so we chunk small and make more, smaller rules.
+        private const int ChunkSize = 300;
 
         public static async Task<(bool ok, string message)> ApplyLockAsync(
-            AwsIpService aws, ISet<string> blockRegionCodes, string gameProgramPath = null)
+            AwsIpService aws, ISet<string> blockRegionCodes, IReadOnlyList<string> gameProgramPaths = null)
         {
             if (blockRegionCodes == null || blockRegionCodes.Count == 0)
             {
@@ -42,18 +45,44 @@ namespace MakeYourChoice
                 if (cidrs.Count == 0)
                     return (false, "Could not fetch AWS IP ranges (no internet?). No changes were made.");
 
-                // Scope the block to the DBD executable when we know it, so ONLY the game is blocked
-                // from the unchosen regions — not the whole PC. This also lets Make Your Choice's own
-                // beacon probes reach those regions (a global rule would block them too).
-                bool scoped = !string.IsNullOrWhiteSpace(gameProgramPath) && File.Exists(gameProgramPath);
+                // Scope the block to the DBD executables we found, so ONLY the game is blocked from the
+                // unchosen regions — not the whole PC. A player can have several storefront builds
+                // installed, so each one gets its own rule; missing one would leave it unblocked.
+                var programs = (gameProgramPaths ?? Array.Empty<string>())
+                    .Where(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p))
+                    .ToList();
 
-                var (code, err) = await Task.Run(() => RunPowerShellScript(BuildApplyScript(cidrs, scoped ? gameProgramPath : null)));
+                // Refuse rather than fall back to an unscoped rule. A global block would stop EVERY
+                // app on the PC reaching those AWS ranges on UDP 7770-7820, which is never what the
+                // user asked for — and it happened silently whenever the game folder was unset or
+                // pointed at a storefront whose binary we couldn't find.
+                if (programs.Count == 0)
+                {
+                    // Clear any rules from a previous apply (including an unscoped one written by an
+                    // older build). Invariant: this group is either a correct scoped lock, or absent —
+                    // never a stale whole-PC block that nothing in the UI accounts for.
+                    RemoveLock();
+                    return (false, "no Dead by Daylight executable was found. Set your game folder in " +
+                                   "Options → Game Folder (or point it straight at the .exe) so the lock " +
+                                   "can be scoped to the game. Any previous firewall rules were removed.");
+                }
+
+                var (code, err) = await Task.Run(() => RunPowerShellScript(BuildApplyScript(cidrs, programs)));
                 if (code != 0)
                 {
                     RemoveLock();
-                    return (false, $"Failed to create firewall rules (run as Administrator?). {err}".Trim());
+                    var hint = "Failed to create firewall rules.";
+                    if (err != null && err.Contains("cannot find the file", StringComparison.OrdinalIgnoreCase))
+                        hint = "Failed to create firewall rules (the rule was too large or the Windows Defender Firewall service is unavailable).";
+                    else if (err != null && err.Contains("Access is denied", StringComparison.OrdinalIgnoreCase))
+                        hint = "Failed to create firewall rules (run Make Your Choice as Administrator).";
+                    return (false, $"{hint} {err}".Trim());
                 }
-                var scopeMsg = scoped ? "the DBD game only" : "all apps (set your game folder to limit this to DBD)";
+                // Name what we scoped to: partial coverage (e.g. the Steam build found but not an Epic
+                // one installed elsewhere) must be visible, never silently assumed.
+                var scopeMsg = programs.Count == 1
+                    ? $"the DBD game only ({Path.GetFileName(programs[0])})"
+                    : $"the DBD game only ({programs.Count} builds: {string.Join(", ", programs.Select(Path.GetFileName))})";
                 return (true,
                     $"blocked UDP {BlockedUdpPorts} to {cidrs.Count} IP ranges across {blockRegionCodes.Count} region(s) for {scopeMsg}");
             }
@@ -63,27 +92,30 @@ namespace MakeYourChoice
             }
         }
 
-        private static string BuildApplyScript(List<string> cidrs, string gameProgramPath)
+        // Windows Firewall's -Program takes one full executable path (no bare names, no wildcards), so
+        // covering several storefront builds means repeating the CIDR chunks once per executable.
+        private static string BuildApplyScript(List<string> cidrs, List<string> gameProgramPaths)
         {
             var sb = new StringBuilder();
             sb.AppendLine("$ErrorActionPreference = 'Stop'");
             sb.AppendLine($"Remove-NetFirewallRule -Group '{RuleGroup}' -ErrorAction SilentlyContinue");
-            // PowerShell single-quoted literal; escape any embedded single quotes by doubling them.
-            string programClause = string.IsNullOrEmpty(gameProgramPath)
-                ? ""
-                : $"-Program '{gameProgramPath.Replace("'", "''")}' ";
             int ruleNum = 0;
-            for (int i = 0; i < cidrs.Count; i += ChunkSize)
+            foreach (var program in gameProgramPaths)
             {
-                ruleNum++;
-                var chunk = cidrs.Skip(i).Take(ChunkSize).Select(c => "'" + c + "'");
-                sb.AppendLine($"$a{ruleNum} = @({string.Join(",", chunk)})");
-                sb.AppendLine(
-                    $"New-NetFirewallRule -DisplayName '{RuleGroup} {ruleNum}' -Group '{RuleGroup}' " +
-                    $"-Description 'Blocks DBD game-server UDP traffic to unchosen AWS regions.' " +
-                    $"-Direction Outbound -Action Block -Protocol UDP -RemotePort {BlockedUdpPorts} " +
-                    programClause +
-                    $"-RemoteAddress $a{ruleNum} | Out-Null");
+                // PowerShell single-quoted literal; escape any embedded single quotes by doubling them.
+                string programClause = $"-Program '{program.Replace("'", "''")}' ";
+                for (int i = 0; i < cidrs.Count; i += ChunkSize)
+                {
+                    ruleNum++;
+                    var chunk = cidrs.Skip(i).Take(ChunkSize).Select(c => "'" + c + "'");
+                    sb.AppendLine($"$a{ruleNum} = @({string.Join(",", chunk)})");
+                    sb.AppendLine(
+                        $"New-NetFirewallRule -DisplayName '{RuleGroup} {ruleNum}' -Group '{RuleGroup}' " +
+                        $"-Description 'Blocks DBD game-server UDP traffic to unchosen AWS regions.' " +
+                        $"-Direction Outbound -Action Block -Protocol UDP -RemotePort {BlockedUdpPorts} " +
+                        programClause +
+                        $"-RemoteAddress $a{ruleNum} | Out-Null");
+                }
             }
             return sb.ToString();
         }

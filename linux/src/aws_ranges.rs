@@ -11,6 +11,7 @@ pub struct AwsCidr {
     prefix_len: u8,
     region: String,
     prefix: String,
+    service: String, // AWS service tag, e.g. "EC2", "S3", "AMAZON"
 }
 
 #[derive(Clone)]
@@ -54,6 +55,7 @@ impl AwsIpService {
                 };
 
                 let region = p.get("region").and_then(|v| v.as_str()).unwrap_or("");
+                let service = p.get("service").and_then(|v| v.as_str()).unwrap_or("");
 
                 if let Some((network, mask, prefix_len)) = parse_ipv4_cidr(ip_prefix) {
                     list.push(AwsCidr {
@@ -62,6 +64,7 @@ impl AwsIpService {
                         prefix_len,
                         region: region.to_string(),
                         prefix: ip_prefix.to_string(),
+                        service: service.to_string(),
                     });
                 }
             }
@@ -117,14 +120,18 @@ impl AwsIpService {
         best.map(|c| c.region.clone())
     }
 
-    /// CIDR strings (e.g. "3.5.0.0/16") for the given AWS region codes. Used to firewall-block
-    /// a region's game-server data plane.
+    /// CIDR strings (e.g. "3.5.0.0/16") for the given AWS region codes. Used to firewall-block a
+    /// region's game-server data plane.
+    ///
+    /// Scoped to the EC2 service — that's where GameLift game servers run — so we block the game-server
+    /// ranges without also nuking unrelated AWS traffic (S3, CloudFront, Route53, …). This also shrinks
+    /// the set ~4x (~7000 -> ~1800 CIDRs).
     pub async fn get_cidrs_for_regions(&self, codes: &std::collections::HashSet<String>) -> Vec<String> {
         let _ = self.refresh().await;
         let cidrs = self.cidrs.lock().unwrap();
         let mut set = std::collections::HashSet::new();
         for c in cidrs.iter() {
-            if codes.contains(&c.region) {
+            if c.service.eq_ignore_ascii_case("EC2") && codes.contains(&c.region) {
                 set.insert(c.prefix.clone());
             }
         }

@@ -8,8 +8,6 @@ mod aws_ranges;
 mod dbq;
 mod firewall;
 mod tray;
-mod live_probe;
-mod server_registry;
 
 use gio::{Menu, SimpleAction};
 use glib::Type;
@@ -19,7 +17,7 @@ use gtk4::{
     CellRendererText, CheckButton, ComboBoxText, Dialog, Entry, FileChooserAction,
     FileChooserNative, FileFilter, Image, Label, ListStore, MenuButton, MessageDialog,
     MessageType, Orientation, PolicyType, ResponseType, ScrolledWindow, SelectionMode, Separator,
-    SpinButton, TreeView, TreeViewColumn,
+    TreeView, TreeViewColumn,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -87,20 +85,17 @@ struct AppState {
     tokio_runtime: Arc<Runtime>,
     sniffer: Arc<TrafficSniffer>,
     aws_service: Arc<AwsIpService>,
-    // Learned + seeded DBD server endpoints per region, probed by the active beacon.
-    server_registry: Arc<server_registry::ServerRegistry>,
     connected_to_label: Label,
     connection_dot: Label,
+    // Inline firewall-apply progress (spinner + label), shown while Enforced firewall rules are written.
+    firewall_progress: GtkBox,
+    firewall_spinner: gtk4::Spinner,
     // RESOLVED status per AWS region code (read by the tray + latency list). Resolved each poll from
-    // three inputs in priority order: recent live connection > active beacon > Dead by Queue.
+    // two inputs in priority order: recent live connection > Dead by Queue.
     dbq_online: RefCell<HashMap<String, bool>>,
     dbq_raw: RefCell<HashMap<String, bool>>,           // DBQ's own /regions view (fallback input)
     dbq_data_unix: RefCell<Option<i64>>,               // DBQ's data refresh time (unix), for freshness
-    beacon_state: RefCell<HashMap<String, i32>>,       // 1=online, else unknown
-    prev_live_count: RefCell<HashMap<String, i32>>,    // last poll's live count (edge detection)
-    dead_polls: RefCell<HashMap<String, i32>>,         // consecutive all-dead polls (backoff)
-    beacon_poll_count: RefCell<i64>,
-    status_source: RefCell<HashMap<String, String>>,   // "live" | "beacon" | "dbq"
+    status_source: RefCell<HashMap<String, String>>,   // "live" | "dbq"
     // UTC instant of the last real sniffer connection per region; "live" counts only while recent.
     last_connection: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     // Last queue-time text for the preferred region, shown in the tray tooltip.
@@ -440,7 +435,8 @@ fn build_ui(app: &Application) {
         }
     }
 
-    // Create ListStore for the list view (region name, latency, stable, checked, is_divider, latency_color, tooltip)
+    // Create ListStore for the list view (region name, latency, stable, checked, is_divider,
+    // latency_color, tooltip, status text, status color)
     let list_store = ListStore::new(&[
         Type::STRING,
         Type::STRING,
@@ -449,6 +445,8 @@ fn build_ui(app: &Application) {
         Type::BOOL,
         Type::STRING, // latency foreground color
         Type::STRING, // tooltip text
+        Type::STRING, // status text (Online/Offline/Unknown)
+        Type::STRING, // status foreground color
     ]);
 
     // Group regions by category
@@ -488,6 +486,8 @@ fn build_ui(app: &Application) {
                     (4, &true), // is_divider flag
                     (5, &"black".to_string()), // default color for dividers (not displayed anyway)
                     (6, &String::new()), // no tooltip for dividers
+                    (7, &String::new()), // no status for dividers
+                    (8, &"gray".to_string()), // status color (not displayed anyway)
                 ],
             );
 
@@ -518,6 +518,8 @@ fn build_ui(app: &Application) {
                         (4, &false), // not a divider
                         (5, &"gray".to_string()), // initial color
                         (6, &tooltip), // tooltip text
+                        (7, &"Unknown".to_string()), // initial status
+                        (8, &"gray".to_string()), // status color
                     ],
                 );
             }
@@ -594,13 +596,23 @@ fn build_ui(app: &Application) {
 
     let col_latency = TreeViewColumn::new();
     col_latency.set_title("Latency");
-    col_latency.set_min_width(115);
+    col_latency.set_min_width(85);
     let cell_latency = CellRendererText::new();
     cell_latency.set_property("style", pango::Style::Italic);
     col_latency.pack_start(&cell_latency, true);
     col_latency.add_attribute(&cell_latency, "text", 1);
     col_latency.add_attribute(&cell_latency, "foreground", 5); // Use color from column 5
     tree_view.append_column(&col_latency);
+
+    // Status column: real online/offline for every server (Online/Offline/Unknown).
+    let col_status = TreeViewColumn::new();
+    col_status.set_title("Status");
+    col_status.set_min_width(95);
+    let cell_status = CellRendererText::new();
+    col_status.pack_start(&cell_status, true);
+    col_status.add_attribute(&cell_status, "text", 7);
+    col_status.add_attribute(&cell_status, "foreground", 8); // status color from column 8
+    tree_view.append_column(&col_status);
 
     // Create scrolled window for tree view
     let scrolled = ScrolledWindow::new();
@@ -612,7 +624,7 @@ fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Make Your Choice (DbD Server Selector)")
-        .default_width(405)
+        .default_width(480)
         .default_height(585)
         .build();
 
@@ -722,6 +734,19 @@ fn build_ui(app: &Application) {
     button_box.append(&btn_revert);
     button_box.append(&btn_apply);
 
+    // Inline firewall-apply progress (hidden until an Enforced apply is writing firewall rules).
+    let firewall_spinner = gtk4::Spinner::new();
+    let firewall_progress_label = Label::new(Some("Writing firewall rules…"));
+    firewall_progress_label.add_css_class("italic-label");
+    let firewall_progress = GtkBox::new(Orientation::Horizontal, 8);
+    firewall_progress.set_margin_start(12);
+    firewall_progress.set_margin_end(12);
+    firewall_progress.set_margin_top(4);
+    firewall_progress.set_margin_bottom(4);
+    firewall_progress.append(&firewall_spinner);
+    firewall_progress.append(&firewall_progress_label);
+    firewall_progress.set_visible(false);
+
     // Initialize AWS service
     let aws_service = Arc::new(AwsIpService::new());
 
@@ -813,27 +838,16 @@ fn build_ui(app: &Application) {
         });
     }
 
-    // Learned + seeded DBD servers, probed by the beacon.
-    let server_registry = Arc::new(server_registry::ServerRegistry::new());
-
     // Initialize Sniffer
     let aws_service_clone = aws_service.clone();
     let runtime_clone = tokio_runtime.clone();
     let region_tx_clone = region_tx.clone();
     let last_seen_clone = last_seen.clone();
-    let registry_clone = server_registry.clone();
-    let harvested: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     // Shared with the status resolver: when we last actually connected to each region.
     let last_connection: Arc<Mutex<HashMap<String, std::time::Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     let last_connection_sniff = last_connection.clone();
-    let settings_sniff = settings.clone(); // to gate the active port-harvest on the live-scan toggle
 
-    let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port, local_port| {
-        // Ignore the beacon's own probe packets (and the server replies to them) so a probe never
-        // shows as a real connection or self-feeds the pool.
-        if live_probe::is_beacon_local_port(local_port) {
-            return;
-        }
+    let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port, _local_port| {
         if let Ok(last) = last_seen_clone.lock() {
             if let Some((last_ip, last_region)) = &*last {
                 if last_ip == &remote_ip {
@@ -847,33 +861,17 @@ fn build_ui(app: &Application) {
         let ip_string = remote_ip.clone();
         let region_tx = region_tx_clone.clone();
         let last_seen_update = last_seen_clone.clone();
-        let registry = registry_clone.clone();
-        let harvested = harvested.clone();
         let last_conn = last_connection_sniff.clone();
-        let settings_h = settings_sniff.clone();
-        let port = _port;
 
         runtime.spawn(async move {
             let region_name_opt = aws.get_region(&ip_string).await;
             if let Ok(mut last) = last_seen_update.lock() {
                 *last = Some((ip_string.clone(), region_name_opt.clone()));
             }
-            // Learn this server (and harvest the instance's full port set once) into the pool.
+            // Record the live connection time (authoritative "online" while recent).
             if let Some(code) = aws.get_region_code(&ip_string).await {
-                // Record the live connection time (authoritative "online" while recent).
                 if let Ok(mut lc) = last_conn.lock() {
                     lc.insert(code.clone(), std::time::Instant::now());
-                }
-                registry.record(&code, &ip_string, port);
-                // Harvest the instance's full port set once — active probing, only when live
-                // scanning is enabled.
-                let first_seen = harvested.lock().map(|mut h| h.insert(ip_string.clone())).unwrap_or(false);
-                let scanning = settings_h.lock().map(|s| s.live_server_scanning).unwrap_or(false);
-                if first_seen && scanning {
-                    let ports = live_probe::harvest_live_ports(&ip_string).await;
-                    for p in ports {
-                        registry.record(&code, &ip_string, p);
-                    }
                 }
             }
             let _ = region_tx.send((ip_string, region_name_opt));
@@ -908,16 +906,13 @@ fn build_ui(app: &Application) {
         tokio_runtime,
         sniffer,
         aws_service,
-        server_registry,
         connected_to_label: connected_value,
         connection_dot: connection_dot,
+        firewall_progress,
+        firewall_spinner,
         dbq_online: RefCell::new(HashMap::new()),
         dbq_raw: RefCell::new(HashMap::new()),
         dbq_data_unix: RefCell::new(None),
-        beacon_state: RefCell::new(HashMap::new()),
-        prev_live_count: RefCell::new(HashMap::new()),
-        dead_polls: RefCell::new(HashMap::new()),
-        beacon_poll_count: RefCell::new(0),
         status_source: RefCell::new(HashMap::new()),
         last_connection,
         last_queue_text: RefCell::new(String::new()),
@@ -1037,6 +1032,7 @@ fn build_ui(app: &Application) {
     main_box.append(&connected_box);
     main_box.append(&tip_label);
     main_box.append(&scrolled);
+    main_box.append(&firewall_progress);
     main_box.append(&button_box);
 
     window.set_child(Some(&main_box));
@@ -1913,11 +1909,11 @@ fn reset_hosts_action(app_state: &Rc<AppState>, window: &ApplicationWindow) {
         if response == ResponseType::Yes {
             match app_state.hosts_manager.restore_default() {
                 Ok(_) => {
-                    // Reverting to default also clears the hard region lock's firewall rules.
+                    // Reverting to default also clears the firewall rules; drop Enforced to Gatekeep.
                     {
                         let mut s = app_state.settings.lock().unwrap();
-                        if s.use_hard_lock {
-                            s.use_hard_lock = false;
+                        if s.apply_mode == ApplyMode::Enforced {
+                            s.apply_mode = ApplyMode::Gatekeep;
                             let _ = s.save();
                             firewall::remove_lock();
                         }
@@ -2061,6 +2057,16 @@ fn show_conflict_dialog(
     dialog.show();
 }
 
+// Show/hide the inline "Writing firewall rules…" spinner during an Enforced firewall apply.
+fn set_firewall_progress(app_state: &Rc<AppState>, active: bool) {
+    app_state.firewall_progress.set_visible(active);
+    if active {
+        app_state.firewall_spinner.start();
+    } else {
+        app_state.firewall_spinner.stop();
+    }
+}
+
 fn apply_hosts_changes(
     app_state: &Rc<AppState>,
     window: &ApplicationWindow,
@@ -2070,7 +2076,9 @@ fn apply_hosts_changes(
     merge_unstable: bool,
 ) {
     let result = match apply_mode {
-        ApplyMode::Gatekeep => app_state.hosts_manager.apply_gatekeep(
+        // Gatekeep and Enforced both edit the hosts file the same way; Enforced additionally applies
+        // the firewall lock below.
+        ApplyMode::Gatekeep | ApplyMode::Enforced => app_state.hosts_manager.apply_gatekeep(
             &app_state.regions,
             &app_state.blocked_regions,
             selected,
@@ -2111,18 +2119,21 @@ fn apply_hosts_changes(
                 ),
             );
 
-            // Hard region lock: firewall-block the game-server data plane of every region NOT in
-            // the (merge-aware) allowed set, so DBD's server-side fallback can't place you there.
-            let use_hard_lock = app_state.settings.lock().unwrap().use_hard_lock;
+            // Enforced mode: firewall-block the game-server data plane of every region NOT in the
+            // (merge-aware) allowed set, so DBD's server-side fallback can't place you there.
+            let use_hard_lock = apply_mode == ApplyMode::Enforced;
             if use_hard_lock {
                 let block = compute_block_codes(app_state, selected, merge_unstable);
                 let aws = app_state.aws_service.clone();
                 let runtime = app_state.tokio_runtime.clone();
                 let window = window.clone();
+                set_firewall_progress(app_state, true);
+                let progress_state = app_state.clone();
                 glib::spawn_future_local(async move {
                     let res = runtime
                         .spawn(async move { firewall::apply_lock(&aws, &block).await })
                         .await;
+                    set_firewall_progress(&progress_state, false);
                     if let Ok(Err(e)) = res {
                         show_error_dialog(&window, "Hard region lock", &e);
                     }
@@ -2145,7 +2156,7 @@ fn reapply_gatekeep_silently(app_state: &Rc<AppState>) {
     }
     let (block_mode, merge_unstable, use_hard_lock) = {
         let s = app_state.settings.lock().unwrap();
-        (s.block_mode, s.merge_unstable, s.use_hard_lock)
+        (s.block_mode, s.merge_unstable, s.apply_mode == ApplyMode::Enforced)
     };
     let _ = app_state.hosts_manager.apply_gatekeep(
         &app_state.regions,
@@ -2158,10 +2169,13 @@ fn reapply_gatekeep_silently(app_state: &Rc<AppState>) {
         let block = compute_block_codes(app_state, &selected, merge_unstable);
         let aws = app_state.aws_service.clone();
         let runtime = app_state.tokio_runtime.clone();
+        set_firewall_progress(app_state, true);
+        let progress_state = app_state.clone();
         glib::spawn_future_local(async move {
             let _ = runtime
                 .spawn(async move { firewall::apply_lock(&aws, &block).await })
                 .await;
+            set_firewall_progress(&progress_state, false);
         });
     }
 }
@@ -2174,7 +2188,7 @@ fn handle_apply_click(app_state: &Rc<AppState>, window: &ApplicationWindow) {
         let had_lock = {
             let mut s = app_state.settings.lock().unwrap();
             s.selected_regions.clear();
-            let h = s.use_hard_lock;
+            let h = s.apply_mode == ApplyMode::Enforced;
             let _ = s.save();
             h
         };
@@ -2240,8 +2254,13 @@ fn handle_revert_click(app_state: &Rc<AppState>, window: &ApplicationWindow) {
     app_state.selected_regions.borrow_mut().clear();
     persist_selection(app_state);
 
-    // Remove any firewall hard lock too, so Revert clears both backends like the Windows build.
-    if app_state.settings.lock().map(|s| s.use_hard_lock).unwrap_or(false) {
+    // Remove any firewall lock too, so Revert clears both backends like the Windows build.
+    if app_state
+        .settings
+        .lock()
+        .map(|s| s.apply_mode == ApplyMode::Enforced)
+        .unwrap_or(false)
+    {
         firewall::remove_lock();
     }
 
@@ -2285,9 +2304,20 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     // Apply mode
     let mode_label = Label::new(Some("Method:"));
     mode_label.set_halign(gtk4::Align::Start);
+    // Enforced is the firewall method — a selectable apply mode rather than a separate checkbox.
+    // Index 0 = Gatekeep, 1 = Enforced (Gatekeep + firewall), 2 = Universal Redirect.
     let mode_combo = ComboBoxText::new();
     mode_combo.append_text("Gatekeep (default)");
+    mode_combo.append_text("Enforced (firewall)");
     mode_combo.append_text("Universal Redirect (deprecated)");
+    mode_combo.set_tooltip_text(Some(
+        "Gatekeep edits your hosts file to steer matchmaking away from unchosen regions.\n\
+         Enforced (firewall) does the same and also adds an nftables rule that blocks unchosen \
+         regions' game servers — more reliable for solo unstable picks, but you can't connect elsewhere \
+         if your pick is offline. With 'Merge unstable servers' on, the similar stable servers stay \
+         allowed too. (Requires nftables; prompts for admin via pkexec.)\n\
+         Universal Redirect is deprecated.",
+    ));
 
     let mode_notice = Label::new(Some(
         "After changing this setting, reapply your selection to apply changes.",
@@ -2298,8 +2328,9 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
 
     let settings = app_state.settings.lock().unwrap();
     mode_combo.set_active(Some(match settings.apply_mode {
+        ApplyMode::UniversalRedirect => 2,
+        ApplyMode::Enforced => 1,
         ApplyMode::Gatekeep => 0,
-        ApplyMode::UniversalRedirect => 1,
     }));
 
     // Block mode - using CheckButtons in radio mode
@@ -2307,8 +2338,6 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     block_label.set_halign(gtk4::Align::Start);
     let app_label = Label::new(Some("App:"));
     app_label.set_halign(gtk4::Align::Start);
-    let experimental_label = Label::new(Some("Experimental:"));
-    experimental_label.set_halign(gtk4::Align::Start);
     let rb_both = CheckButton::with_label("Block both (default)");
     let rb_ping = CheckButton::with_label("Block UDP ping beacon endpoints");
     let rb_service = CheckButton::with_label("Block service endpoints");
@@ -2326,13 +2355,6 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     // Merge unstable
     let merge_check = CheckButton::with_label("Merge unstable servers (recommended)");
     merge_check.set_active(settings.merge_unstable);
-
-    let hard_lock_check =
-        CheckButton::with_label("Use hard region lock (firewall) to force exclude unchosen servers");
-    hard_lock_check.set_active(settings.use_hard_lock);
-    hard_lock_check.set_tooltip_text(Some(
-        "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline. With 'Merge unstable servers' also on, the similar stable servers stay allowed too. Everything else is blocked. (Requires nftables; prompts for admin via pkexec.)",
-    ));
 
     let minimize_tray_check = CheckButton::with_label("Minimize to system tray");
     minimize_tray_check.set_active(settings.minimize_to_tray);
@@ -2352,29 +2374,6 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
         "Launch Make Your Choice automatically at login (adds an entry to ~/.config/autostart).",
     ));
 
-    let live_scan_check = CheckButton::with_label("Live server scanning");
-    live_scan_check.set_active(settings.live_server_scanning);
-    live_scan_check.set_tooltip_text(Some(
-        "Actively ping known DBD game servers to detect in real time when an unstable region is really online (faster than Dead by Queue). Turn off to send no probe traffic and rely only on Dead by Queue plus servers you actually connect to.",
-    ));
-
-    let debug_check = CheckButton::with_label("Debug (beacon log)");
-    debug_check.set_active(settings.debug_beacon);
-    debug_check.set_tooltip_text(Some(
-        "Verbose beacon diagnostics to stderr and live-server count + Dead by Queue data age in the tray tooltip. For tuning.",
-    ));
-
-    let poll_label = Label::new(Some("Server status poll interval (seconds):"));
-    poll_label.set_halign(gtk4::Align::Start);
-    let poll_spin = SpinButton::with_range(5.0, 600.0, 5.0);
-    poll_spin.set_value(settings.poll_interval_seconds.max(5) as f64);
-    poll_spin.set_tooltip_text(Some(
-        "How often the Dead by Queue server status is checked. Higher is lighter on the network; lower notices a server coming online sooner. Default 30.",
-    ));
-    let poll_row = GtkBox::new(Orientation::Horizontal, 6);
-    poll_row.append(&poll_label);
-    poll_row.append(&poll_spin);
-
     settings_box.append(&mode_label);
     settings_box.append(&mode_combo);
     settings_box.append(&mode_notice);
@@ -2384,17 +2383,11 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&rb_ping);
     settings_box.append(&rb_service);
     settings_box.append(&merge_check);
-    settings_box.append(&hard_lock_check);
-    settings_box.append(&poll_row);
     settings_box.append(&Separator::new(Orientation::Horizontal));
     settings_box.append(&app_label);
     settings_box.append(&minimize_tray_check);
     settings_box.append(&notify_check);
     settings_box.append(&autostart_check);
-    settings_box.append(&Separator::new(Orientation::Horizontal));
-    settings_box.append(&experimental_label);
-    settings_box.append(&live_scan_check);
-    settings_box.append(&debug_check);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2473,10 +2466,14 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
                 return;
             }
 
+            // Method dropdown: 0 = Gatekeep, 1 = Enforced (Gatekeep + firewall), 2 = Universal Redirect.
+            let was_enforced = settings.apply_mode == ApplyMode::Enforced;
             settings.apply_mode = match mode_combo.active() {
-                Some(1) => ApplyMode::UniversalRedirect,
+                Some(2) => ApplyMode::UniversalRedirect,
+                Some(1) => ApplyMode::Enforced,
                 _ => ApplyMode::Gatekeep,
             };
+            let now_enforced = settings.apply_mode == ApplyMode::Enforced;
 
             settings.block_mode = if rb_both.is_active() {
                 BlockMode::Both
@@ -2488,14 +2485,9 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
 
             let merge_changed = settings.merge_unstable != merge_check.is_active();
             settings.merge_unstable = merge_check.is_active();
-            let hard_lock_was_on = settings.use_hard_lock;
-            let hard_lock_changed = hard_lock_was_on != hard_lock_check.is_active();
-            settings.use_hard_lock = hard_lock_check.is_active();
+            let hard_lock_changed = was_enforced != now_enforced;
             settings.minimize_to_tray = minimize_tray_check.is_active();
             settings.notify_server_online = notify_check.is_active();
-            settings.live_server_scanning = live_scan_check.is_active();
-            settings.debug_beacon = debug_check.is_active();
-            settings.poll_interval_seconds = poll_spin.value() as u64;
             let autostart_changed = settings.auto_start != autostart_check.is_active();
             settings.auto_start = autostart_check.is_active();
             settings.game_path = game_path_text;
@@ -2504,22 +2496,22 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
 
             let merge_now = settings.merge_unstable;
             let apply_mode_now = settings.apply_mode;
-            let hard_lock_turned_off = hard_lock_was_on && !settings.use_hard_lock;
+            let hard_lock_turned_off = was_enforced && !now_enforced;
             let autostart_now = settings.auto_start;
             drop(settings);
 
-            // Apply the (possibly changed) poll interval to the status timers immediately.
+            // Restart the status timers so the changed settings take effect immediately.
             restart_status_timers(app_state_clone.clone());
 
-            // Turning the hard lock off removes its firewall rules now (two-way).
+            // Turning Enforced off removes its firewall rules now (two-way).
             if hard_lock_turned_off {
                 firewall::remove_lock();
             }
 
-            // Keep the backend in sync with the UI on demand: if a Gatekeep selection is applied and
-            // Merge or the hard lock changed, re-apply now (hosts + firewall) — no need to Revert.
+            // Keep the backend in sync with the UI on demand: if a gatekeep-based selection is applied
+            // and Merge or the firewall lock changed, re-apply now (hosts + firewall) — no need to Revert.
             let section_active = !app_state_clone.hosts_manager.get_blocked_hostnames().is_empty();
-            if apply_mode_now == ApplyMode::Gatekeep
+            if apply_mode_now != ApplyMode::UniversalRedirect
                 && (merge_changed || hard_lock_changed)
                 && section_active
             {
@@ -2542,16 +2534,12 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             let mut settings = app_state_clone.settings.lock().unwrap();
 
             // Reset to default values
+            let hard_lock_was_on = settings.apply_mode == ApplyMode::Enforced;
             settings.apply_mode = ApplyMode::Gatekeep;
             settings.block_mode = BlockMode::Both;
             settings.merge_unstable = true;
-            let hard_lock_was_on = settings.use_hard_lock;
-            settings.use_hard_lock = false;
             settings.minimize_to_tray = true;
             settings.notify_server_online = false;
-            settings.live_server_scanning = false;
-            settings.debug_beacon = false;
-            settings.poll_interval_seconds = 60;
             let autostart_was_on = settings.auto_start;
             settings.auto_start = false;
             settings.game_path.clear();
@@ -2559,7 +2547,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             let _ = settings.save();
             drop(settings);
 
-            // Apply the default poll interval to the status timers immediately.
+            // Restart the status timers so the reverted settings take effect immediately.
             restart_status_timers(app_state_clone.clone());
 
             if hard_lock_was_on {
@@ -2574,13 +2562,9 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             mode_combo.set_active(Some(0));
             rb_both.set_active(true);
             merge_check.set_active(true);
-            hard_lock_check.set_active(false);
             minimize_tray_check.set_active(true);
             notify_check.set_active(false);
             autostart_check.set_active(false);
-            live_scan_check.set_active(false);
-            debug_check.set_active(false);
-            poll_spin.set_value(30.0);
 
             // Refresh the warning symbols in the list view
             refresh_warning_symbols(
@@ -2698,21 +2682,23 @@ fn start_ping_timer(app_state: Rc<AppState>) {
                         if is_region_blocked_by_hosts(&clean_name, &regions, &blocked_regions, &blocked_hosts) {
                             list_store.set(&iter, &[(1, &"disconnected".to_string()), (5, &"gray".to_string())]);
                         } else if let Some(&latency) = latency_results.get(&clean_name) {
-                            let base = if latency >= 0 {
+                            let text = if latency >= 0 {
                                 format!("{} ms", latency)
                             } else {
                                 "disconnected".to_string()
                             };
-                            // For unstable servers, show real online/offline from Dead by Queue.
-                            let stable = regions.get(&clean_name).map(|i| i.stable).unwrap_or(true);
-                            let code = aws_code_for_region(&regions, &clean_name);
-                            let (text, color) = match code.as_ref().filter(|_| !stable).and_then(|c| dbq.get(c)) {
-                                Some(true) => (format!("{}  ✓", base), get_color_for_latency(latency).to_string()),
-                                Some(false) => (format!("{}  ⚠", base), "#ffa500".to_string()),
-                                None => (base, get_color_for_latency(latency).to_string()),
-                            };
-                            list_store.set(&iter, &[(1, &text), (5, &color)]);
+                            list_store.set(&iter, &[(1, &text), (5, &get_color_for_latency(latency).to_string())]);
                         }
+
+                        // Status column: real online/offline for every server, sourced from Dead by
+                        // Queue plus recent live connections (resolved in dbq_online).
+                        let code = aws_code_for_region(&regions, &clean_name);
+                        let (status_text, status_color) = match code.as_ref().and_then(|c| dbq.get(c)) {
+                            Some(true) => ("Online", "#3cb371"),   // MediumSeaGreen
+                            Some(false) => ("Offline", "#dc143c"), // Crimson
+                            None => ("Unknown", "gray"),
+                        };
+                        list_store.set(&iter, &[(7, &status_text.to_string()), (8, &status_color.to_string())]);
                     }
 
                     if !list_store.iter_next(&iter) {
@@ -2726,11 +2712,9 @@ fn start_ping_timer(app_state: Rc<AppState>) {
     });
 }
 
-// The configured status poll interval (seconds), clamped to a sane minimum.
-fn poll_interval_secs(app_state: &Rc<AppState>) -> u32 {
-    let s = app_state.settings.lock().unwrap().poll_interval_seconds;
-    s.max(5) as u32
-}
+// How often (seconds) the Dead by Queue poll runs. Fixed; no longer user-configurable
+// or stored in the config.
+const POLL_INTERVAL_SECS: u32 = 30;
 
 // Stop and restart the status timer so a changed poll interval takes effect immediately.
 fn restart_status_timers(app_state: Rc<AppState>) {
@@ -2740,13 +2724,14 @@ fn restart_status_timers(app_state: Rc<AppState>) {
     start_dbq_timer(app_state);
 }
 
+// Status debug: DBQ data age in the tray tooltip. No UI — flip to true here while debugging.
+const DEBUG_STATUS: bool = false;
+
 // Poll Dead by Queue for real online/offline status + queue time, and update the tray + notify.
-// (The GameLift-beacon probe was removed: the beacon can't read DBD fleet state — UDP 443 never
-// echoes, and 7770 echoes for every region — so it always reported the selected region as down.)
+// DBQ is the single status source, backed by the sniffer's "recently connected" signal.
 fn start_dbq_timer(app_state: Rc<AppState>) {
-    let secs = poll_interval_secs(&app_state);
     let timer_state = app_state.clone();
-    let id = glib::timeout_add_seconds_local(secs, move || {
+    let id = glib::timeout_add_seconds_local(POLL_INTERVAL_SECS, move || {
         let runtime = timer_state.tokio_runtime.clone();
         let app_state = timer_state.clone();
         glib::spawn_future_local(async move {
@@ -2762,112 +2747,7 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 *app_state.dbq_data_unix.borrow_mut() = data_unix; // how current that view is
             }
 
-            // Active beacon (v2): confidence-scaled, deduped-by-instance, hot-set/backoff, jittered,
-            // with edge detection. Skipped (no probe traffic) when live scanning is off.
-            let (live_scanning, debug) = app_state
-                .settings
-                .lock()
-                .map(|s| (s.live_server_scanning, s.debug_beacon))
-                .unwrap_or((false, false));
-            if !live_scanning {
-                app_state.beacon_state.borrow_mut().clear();
-            } else {
-                let poll = {
-                    let mut c = app_state.beacon_poll_count.borrow_mut();
-                    *c += 1;
-                    *c
-                };
-                if poll % 40 == 1 {
-                    app_state.server_registry.prune(14); // keep the pool lean
-                }
-                if debug && poll == 1 {
-                    // Surface the build magic so a stale bootstrap (DBD patched, no fresh capture) is
-                    // visible as the cause of all-timeout probes rather than mistaken for "region down".
-                    eprintln!(
-                        "[beacon] handshake magic={} ({})",
-                        live_probe::active_magic_hex(),
-                        if live_probe::using_learned_handshake() { "learned" } else { "bootstrap" }
-                    );
-                }
-                let mut codes: Vec<String> = Vec::new();
-                for (name, info) in app_state.regions.iter() {
-                    if info.stable {
-                        continue;
-                    }
-                    if let Some(c) = aws_code_for_region(&app_state.regions, name) {
-                        if !codes.contains(&c) {
-                            codes.push(c);
-                        }
-                    }
-                }
-                let mut any_live = false;
-                for code in codes {
-                    let instances = app_state.server_registry.instances_ranked(&code, 48);
-                    let sample = instances.len();
-                    if sample == 0 {
-                        app_state.beacon_state.borrow_mut().insert(code.clone(), 0);
-                        continue;
-                    }
-                    // Low bar by design: DBQ's fresh "down" vetoes stragglers ahead of the beacon
-                    // (resolve_statuses), so this only needs to catch a region coming online — which
-                    // the captured logs show as as few as 1-2 live. A rising edge drops it by 1 more.
-                    let needed = if sample <= 2 { 1 } else { 2 };
-                    let prev = app_state.prev_live_count.borrow().get(&code).copied().unwrap_or(-1);
-                    let dead = app_state.dead_polls.borrow().get(&code).copied().unwrap_or(0);
-                    // Hot set every poll; cold sweep every Nth poll, backing off the longer it's dead.
-                    let cold_every = 1 + dead.min(6) as i64;
-                    let sweep_cold = poll % cold_every == 0;
-                    let take = if sweep_cold { instances.len() } else { 8.min(instances.len()) };
-                    let targets: Vec<(String, u16)> =
-                        instances.iter().take(take).map(|i| (i.ip.clone(), i.port)).collect();
-
-                    let res = runtime
-                        .spawn(async move {
-                            live_probe::probe_for_live(targets, needed.max(1) as usize, 1000, 24, 400).await
-                        })
-                        .await
-                        .ok();
-
-                    let (live_count, live_eps, probed, replied, unreach, to) = match res {
-                        Some(r) => (r.live.len() as i32, r.live, r.probed, r.replied, r.port_unreach, r.timeout),
-                        None => (0, Vec::new(), 0, 0, 0, 0),
-                    };
-                    for (ip, port) in &live_eps {
-                        app_state.server_registry.mark_live(&code, ip, *port);
-                    }
-                    if live_count > 0 {
-                        any_live = true;
-                    }
-                    let rising = prev >= 0 && live_count > prev;
-                    let eff_needed = if rising { (needed - 1).max(1) } else { needed };
-                    let online = live_count >= eff_needed;
-                    app_state.beacon_state.borrow_mut().insert(code.clone(), if online { 1 } else { 0 });
-                    app_state.prev_live_count.borrow_mut().insert(code.clone(), live_count);
-                    app_state
-                        .dead_polls
-                        .borrow_mut()
-                        .insert(code.clone(), if live_count == 0 { dead + 1 } else { 0 });
-
-                    if debug {
-                        let trend = if prev < 0 { "" } else if rising { " rising" } else if live_count < prev { " falling" } else { " flat" };
-                        eprintln!(
-                            "[beacon] {} sample={} probed={}({}) live={} need={}{} -> {} [{} rep, {} unreach, {} to]",
-                            code, sample, probed, if sweep_cold { "full" } else { "hot" },
-                            live_count, eff_needed, trend, if online { "ONLINE" } else { "unknown" },
-                            replied, unreach, to
-                        );
-                        if let Some((ip, port)) = live_eps.first().cloned() {
-                            let a2s = runtime.spawn(async move { live_probe::probe_a2s(&ip, port, 700).await }).await.ok();
-                            eprintln!("[beacon] {} A2S {:?}", code, a2s);
-                        }
-                    }
-                }
-                if any_live {
-                    app_state.server_registry.flush();
-                }
-            }
-
-            // Resolve displayed status: recent live connection > beacon > DBQ.
+            // Resolve displayed status: recent live connection > DBQ.
             resolve_statuses(&app_state);
 
             let Some(pref) = preferred_region(&app_state) else {
@@ -2907,21 +2787,20 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 Some(false) => "OFFLINE",
                 None => "status unknown",
             };
-            // Show which source produced this status (beacon = real-time active probe).
+            // Show which source produced this status ("live" = recent real connection).
             let src = code
                 .as_ref()
                 .filter(|_| online.is_some())
                 .and_then(|c| app_state.status_source.borrow().get(c).cloned())
                 .map(|s| format!(" [{}]", s))
                 .unwrap_or_default();
-            // Debug: append live-count + DBQ data age for tuning.
-            let dbg = if debug {
-                let live = code.as_ref().and_then(|c| app_state.prev_live_count.borrow().get(c).copied()).unwrap_or(0);
+            // Debug: append DBQ data age for tuning.
+            let dbg = if DEBUG_STATUS {
                 let age = match *app_state.dbq_data_unix.borrow() {
                     Some(u) => format!("{}s", now_unix_i64() - u),
                     None => "?".to_string(),
                 };
-                format!("  ({} live, DBQ {})", live, age)
+                format!("  (DBQ {})", age)
             } else {
                 String::new()
             };
@@ -2950,24 +2829,13 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
 }
 
 // Resolve each region's displayed status. Priority:
-//   1. recent live connection          -> ONLINE [live]
-//   2. DBQ fresh AND DBQ says down      -> OFFLINE [dbq]  (the guarantee; cuts beacon stragglers)
-//   3. beacon says online              -> ONLINE [beacon] (speculative; leads "coming online")
-//   4. DBQ value (incl. stale)         -> [dbq]
-//   5. nothing knows                   -> unknown
+//   1. recent live connection -> ONLINE [live]  (the sniffer saw real traffic just now)
+//   2. DBQ's value            -> [dbq]          (the status source)
+//   3. nothing knows          -> unknown
 // Writes the result into dbq_online/status_source, which the tray and latency list read.
 fn resolve_statuses(app_state: &Rc<AppState>) {
     const LIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
-    const DBQ_FRESH_SECS: i64 = 120;
     let now = std::time::Instant::now();
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    // DBQ counts as "the guarantee" only while its data is current (within DBQ_FRESH_SECS).
-    let dbq_fresh = (*app_state.dbq_data_unix.borrow())
-        .map(|u| now_unix - u <= DBQ_FRESH_SECS)
-        .unwrap_or(false);
 
     let mut codes: HashSet<String> = HashSet::new();
     for k in app_state.dbq_raw.borrow().keys() {
@@ -2980,7 +2848,6 @@ fn resolve_statuses(app_state: &Rc<AppState>) {
     }
 
     let last_conn = app_state.last_connection.lock().ok();
-    let beacon = app_state.beacon_state.borrow();
     let raw = app_state.dbq_raw.borrow();
     let mut online_map = app_state.dbq_online.borrow_mut();
     let mut src_map = app_state.status_source.borrow_mut();
@@ -2996,21 +2863,8 @@ fn resolve_statuses(app_state: &Rc<AppState>) {
             src_map.insert(code.clone(), "live".to_string());
             continue;
         }
-        let dbq_val = raw.get(&code).copied();
-        // DBQ is the guarantee: a current "down" cuts the beacon's stragglers.
-        if dbq_fresh && dbq_val == Some(false) {
-            online_map.insert(code.clone(), false);
-            src_map.insert(code.clone(), "dbq".to_string());
-            continue;
-        }
-        // Beacon leads the "coming online" case.
-        if beacon.get(&code).copied().unwrap_or(0) == 1 {
-            online_map.insert(code.clone(), true);
-            src_map.insert(code.clone(), "beacon".to_string());
-            continue;
-        }
-        // Otherwise defer to DBQ's value (online, or a stale down).
-        if let Some(v) = dbq_val {
+        // Otherwise defer to DBQ's value.
+        if let Some(v) = raw.get(&code).copied() {
             online_map.insert(code.clone(), v);
             src_map.insert(code.clone(), "dbq".to_string());
         } else {

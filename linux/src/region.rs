@@ -10,6 +10,9 @@ pub struct RegionInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplyMode {
     Gatekeep,
+    // Enforced = Gatekeep hosts PLUS a firewall lock (the old `use_hard_lock` flag), now a
+    // first-class apply method.
+    Enforced,
     UniversalRedirect,
 }
 

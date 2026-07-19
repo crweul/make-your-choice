@@ -12,9 +12,6 @@ pub struct UserSettings {
     pub last_launched_version: String,
     pub game_path: String,
     pub auto_update_check_paused_until: Option<String>,
-    // Hard region lock: firewall-block the game-server data plane of unchosen regions on apply.
-    #[serde(default)]
-    pub use_hard_lock: bool,
     // Minimize (close button) hides to the system tray instead of quitting.
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
@@ -27,24 +24,10 @@ pub struct UserSettings {
     // Start automatically at login (writes an XDG autostart .desktop entry).
     #[serde(default)]
     pub auto_start: bool,
-    // How often (seconds) the Dead by Queue server-status poll runs.
-    #[serde(default = "default_poll_interval")]
-    pub poll_interval_seconds: u64,
-    // Live server scanning: actively probe known game servers (the beacon). Off by default
-    // (experimental); when off, send no probe traffic and rely on Dead by Queue + connections.
-    #[serde(default)]
-    pub live_server_scanning: bool,
-    // Debug: verbose beacon diagnostics (stderr) + live-count/DBQ-age in the tray tooltip, for tuning.
-    #[serde(default)]
-    pub debug_beacon: bool,
 }
 
 fn default_true() -> bool {
     true
-}
-
-fn default_poll_interval() -> u64 {
-    30
 }
 
 impl Default for UserSettings {
@@ -56,14 +39,10 @@ impl Default for UserSettings {
             last_launched_version: String::new(),
             game_path: String::new(),
             auto_update_check_paused_until: None,
-            use_hard_lock: false,
             minimize_to_tray: true,
             notify_server_online: false,
             selected_regions: Vec::new(),
             auto_start: false,
-            poll_interval_seconds: 30,
-            live_server_scanning: false,
-            debug_beacon: false,
         }
     }
 }
@@ -88,8 +67,16 @@ impl UserSettings {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read settings from {:?}", path))?;
 
-        let settings: UserSettings = serde_yaml::from_str(&content)
+        let mut settings: UserSettings = serde_yaml::from_str(&content)
             .with_context(|| "Failed to parse settings YAML")?;
+
+        // Migrate the retired `use_hard_lock` flag: it used to be a bool layered on Gatekeep and is
+        // now the Enforced apply mode. The field is gone, so read it from the raw YAML.
+        if settings.apply_mode == ApplyMode::Gatekeep
+            && content.lines().any(|l| l.trim() == "use_hard_lock: true")
+        {
+            settings.apply_mode = ApplyMode::Enforced;
+        }
 
         Ok(settings)
     }

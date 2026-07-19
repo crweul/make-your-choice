@@ -152,27 +152,31 @@ namespace MakeYourChoice
         private Button          _btnApply;
         private Button          _btnRevert;
         private Timer           _pingTimer;
-        private enum ApplyMode { Gatekeep, UniversalRedirect }
+        // Inline progress shown while Enforced-mode firewall rules are being written (the slow step of
+        // applying a selection). A marquee bar — the work isn't easily quantified into a percentage.
+        private FlowLayoutPanel _flpFirewallProgress;
+        private Label           _lblFirewallProgress;
+        private ProgressBar     _pbFirewallProgress;
+        // Enforced = Gatekeep hosts PLUS a firewall lock (the old "hard region lock"), now a first-class
+        // apply method rather than a separate flag.
+        private enum ApplyMode { Gatekeep, Enforced, UniversalRedirect }
         private ApplyMode _applyMode = ApplyMode.Gatekeep;
         private enum BlockMode { Both, OnlyPing, OnlyService }
         private BlockMode _blockMode = BlockMode.Both;
         private bool _mergeUnstable = true;
         private string _gamePath;
         private bool _darkMode = false;
-        // When enabled, applying your region selection also firewall-blocks the game-server data
-        // plane (UDP) of every region you did NOT choose, so DBD's fallback (e.g. N. Virginia)
-        // can't place you there. Makes choosing solo unstable servers more reliable.
-        private bool _useHardLock = false;
+        // Enforced mode also firewall-blocks the game-server data plane (UDP) of every region you did
+        // NOT choose, so DBD's fallback (e.g. N. Virginia) can't place you there. Derived from the
+        // apply method — there is no separate hard-lock flag anymore.
+        private bool _useHardLock => _applyMode == ApplyMode.Enforced;
         // When minimized, hide to the system tray instead of the taskbar (default on).
         private bool _minimizeToTray = true;
         // Notify (tray balloon) when the preferred server transitions offline -> online.
         private bool _notifyServerOnline = false;
-        // Live server scanning: actively probe known game servers (the beacon) to detect real-time
-        // status. Off by default (experimental); when off, the app sends no probe traffic and relies
-        // on Dead by Queue + connections.
-        private bool _liveServerScanning = false;
-        // How often (seconds) the GameLift beacon probe and the Dead by Queue poll run.
-        private int _pollIntervalSeconds = 30;
+        // How often (seconds) the Dead by Queue poll runs. Fixed at 30s;
+        // no longer user-configurable or stored in the config.
+        private const int PollIntervalSeconds = 30;
         // Start automatically at Windows logon (via a scheduled task so the elevated app launches
         // without a UAC prompt each login).
         private bool _startWithWindows = false;
@@ -188,10 +192,6 @@ namespace MakeYourChoice
         private TrafficSniffer _sniffer;
         private bool _snifferStarted;
         private AwsIpService _awsService;
-        // EXPERIMENT — learned DBD server IPs per region, fed by the sniffer, probed by the beacon.
-        private readonly ServerRegistry _serverRegistry = new();
-        // IPs we've already full-range-harvested this session (so we do it once per instance).
-        private readonly HashSet<string> _harvestedIps = new();
         private string _lastDetectedIp;
         private int _lastDetectedPort;
         private string _lastDetectedRegion;
@@ -218,6 +218,9 @@ namespace MakeYourChoice
 
         private class UserSettings
         {
+            // ApplyMode.Enforced replaces the retired UseHardRegionLock flag (firewall). PollIntervalSeconds
+            // and DebugBeacon were retired too (poll is hardcoded, debug is a code toggle) — old configs
+            // still holding those keys load fine thanks to IgnoreUnmatchedProperties.
             public ApplyMode ApplyMode { get; set; }
             public BlockMode BlockMode { get; set; }
             public bool MergeUnstable { get; set; } = true;
@@ -225,12 +228,8 @@ namespace MakeYourChoice
             public string GamePath { get; set; }
             public string AutoUpdateCheckPausedUntil { get; set; }
             public bool DarkMode { get; set; }
-            public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
             public bool NotifyServerOnline { get; set; }
-            public bool LiveServerScanning { get; set; } = false;
-            public bool DebugBeacon { get; set; } = false;
-            public int PollIntervalSeconds { get; set; } = 30;
             public bool StartWithWindows { get; set; }
             public List<string> SelectedRegions { get; set; }
         }
@@ -245,24 +244,27 @@ namespace MakeYourChoice
                 if (!File.Exists(SettingsFilePath))
                     return;
                 var yaml = File.ReadAllText(SettingsFilePath);
-                var deserializer = new DeserializerBuilder().Build();
+                // IgnoreUnmatchedProperties so retired keys (e.g. PollIntervalSeconds) in an older
+                // config don't fail the whole load.
+                var deserializer = new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
                 var settings = deserializer.Deserialize<UserSettings>(yaml);
                 if (settings != null)
                 {
                     _applyMode = settings.ApplyMode;
+                    // Migrate the retired hard-lock flag: it used to be a bool layered on Gatekeep and
+                    // is now the Enforced apply method. The property is gone, so read it from the raw YAML.
+                    if (_applyMode == ApplyMode.Gatekeep &&
+                        System.Text.RegularExpressions.Regex.IsMatch(
+                            yaml, @"(?im)^\s*UseHardRegionLock\s*:\s*true\s*$"))
+                        _applyMode = ApplyMode.Enforced;
                     _blockMode = settings.BlockMode;
                     _mergeUnstable = settings.MergeUnstable;
                     _lastLaunchedVersion = settings.LastLaunchedVersion;
                     _gamePath = settings.GamePath;
                     _autoUpdateCheckPausedUntil = settings.AutoUpdateCheckPausedUntil;
                     _darkMode = settings.DarkMode;
-                    _useHardLock = settings.UseHardRegionLock;
                     _minimizeToTray = settings.MinimizeToTray;
                     _notifyServerOnline = settings.NotifyServerOnline;
-                    _liveServerScanning = settings.LiveServerScanning;
-                    _debugBeacon = settings.DebugBeacon;
-                    BeaconLog.Enabled = _debugBeacon;
-                    _pollIntervalSeconds = settings.PollIntervalSeconds >= 5 ? settings.PollIntervalSeconds : 60;
                     _startWithWindows = settings.StartWithWindows;
                     _savedSelection = settings.SelectedRegions ?? new List<string>();
                 }
@@ -293,12 +295,8 @@ namespace MakeYourChoice
                     GamePath = _gamePath,
                     AutoUpdateCheckPausedUntil = _autoUpdateCheckPausedUntil,
                     DarkMode = _darkMode,
-                    UseHardRegionLock = _useHardLock,
                     MinimizeToTray = _minimizeToTray,
                     NotifyServerOnline = _notifyServerOnline,
-                    LiveServerScanning = _liveServerScanning,
-                    DebugBeacon = _debugBeacon,
-                    PollIntervalSeconds = _pollIntervalSeconds,
                     StartWithWindows = _startWithWindows,
                     SelectedRegions = GetCheckedRegionKeys(),
                 };
@@ -459,25 +457,66 @@ namespace MakeYourChoice
                 return (true, "Hard region lock is off; firewall rules removed.");
             }
             var blockCodes = ComputeHardLockBlockCodes(allowedRegions);
-            return await FirewallManager.ApplyLockAsync(_awsService, blockCodes, GetDbdExePath());
-        }
-
-        // Best-effort path to DeadByDaylight-Win64-Shipping.exe, derived from the configured game
-        // folder, so the hard lock can be scoped to the game only. Null if we can't find it (the
-        // firewall then falls back to a global block).
-        private string GetDbdExePath()
-        {
-            var root = _gamePath?.Trim();
-            if (string.IsNullOrEmpty(root)) return null;
+            // Show the inline marquee while the (potentially slow) firewall rules are written.
+            SetFirewallProgress(true);
             try
             {
-                // The user may point at the install root or directly at the exe.
-                if (root.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                    return File.Exists(root) ? root : null;
-                var exe = Path.Combine(root, "DeadByDaylight", "Binaries", "Win64", "DeadByDaylight-Win64-Shipping.exe");
-                return File.Exists(exe) ? exe : null;
+                return await FirewallManager.ApplyLockAsync(_awsService, blockCodes, GetDbdExePaths());
             }
-            catch { return null; }
+            finally
+            {
+                SetFirewallProgress(false);
+            }
+        }
+
+        // Show/hide the inline "Writing firewall rules…" marquee (thread-safe).
+        private void SetFirewallProgress(bool active)
+        {
+            if (_flpFirewallProgress == null || IsDisposed) return;
+            void Apply()
+            {
+                if (_flpFirewallProgress.IsDisposed) return;
+                _flpFirewallProgress.Visible = active;
+            }
+            if (InvokeRequired) BeginInvoke((Action)Apply);
+            else Apply();
+        }
+
+        // Every DBD executable under the configured game folder, so the hard lock can be scoped to the
+        // game only. Empty if none are found, which blocks Enforced mode (see EnsureHardLockCanBeScoped).
+        private List<string> GetDbdExePaths() => GameInstalls.Find(_gamePath);
+
+        /// <summary>
+        /// Gate for Enforced mode: true when the lock can be scoped to real DBD executables. When it
+        /// can't, tells the user why and offers to open Options so they can fix it, then re-checks.
+        /// Returns false if the caller should abort. Always true when Enforced is off.
+        /// </summary>
+        private bool EnsureHardLockCanBeScoped()
+        {
+            if (!_useHardLock) return true;
+            if (GetDbdExePaths().Count > 0) return true;
+
+            bool pathSet = !string.IsNullOrWhiteSpace(_gamePath);
+            var reason = pathSet
+                ? $"No Dead by Daylight executable was found in your game folder:\n\n{_gamePath}\n\n" +
+                  "Make Your Choice looks for " + string.Join(", ", GameInstalls.ExeNames) + "."
+                : "Enforced mode needs your game folder so the firewall rules can be limited to Dead by Daylight.";
+
+            var choice = MessageBox.Show(
+                reason +
+                "\n\nWithout it the rules would have to block every app on this PC, so Enforced mode " +
+                "can't be applied.\n\nTip: pick the folder that opens via Steam → right-click Dead by " +
+                "Daylight → Manage → Browse local files (or the equivalent in the Epic Games launcher). " +
+                "You can also point the setting straight at the .exe.\n\nOpen Options now to set it?",
+                "Game folder required for Enforced mode",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (choice != DialogResult.Yes) return false;
+
+            ShowSettingsDialog();
+            // Re-check: the user may have set a valid folder, or switched off Enforced entirely.
+            return !_useHardLock || GetDbdExePaths().Count > 0;
         }
 
         private class DarkModeColorTable : ProfessionalColorTable
@@ -686,8 +725,6 @@ namespace MakeYourChoice
 
             _sniffer = new TrafficSniffer();
             _sniffer.TrafficDetected += OnTrafficDetected;
-            // Auto-update the beacon's probe template from the game's own handshake (survives patches).
-            _sniffer.HandshakeCaptured += LiveProbe.SetLearnedHandshake;
 
             this.Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"));
             this.Shown += async (_, __) =>
@@ -765,7 +802,6 @@ namespace MakeYourChoice
             if (_sniffer != null)
             {
                 _sniffer.TrafficDetected -= OnTrafficDetected;
-                _sniffer.HandshakeCaptured -= LiveProbe.SetLearnedHandshake;
                 _sniffer.Stop();
             }
             DisposeTray();
@@ -775,9 +811,6 @@ namespace MakeYourChoice
         private async void OnTrafficDetected(string ip, int port, int localPort)
         {
             if (this.Disposing || this.IsDisposed) return;
-            // Ignore the beacon's own probe packets (and the server replies to them) so an active probe
-            // never shows up as a real game connection or self-feeds the learned-server pool.
-            if (LiveProbe.IsBeaconLocalPort(localPort)) return;
 
             void ApplyUi(string regionName)
             {
@@ -870,33 +903,6 @@ namespace MakeYourChoice
                 // Live ground truth: we actually connected to a server in this region, so it's
                 // online right now — override DBQ's lagged data immediately.
                 MarkRegionOnlineFromConnection(regionName);
-                // EXPERIMENT — learn this server IP for the region so the active beacon can probe it
-                // later (even with the game closed) to tell if the fleet is still up.
-                try
-                {
-                    var regionCode = await Task.Run(() => _awsService.GetRegionCodeForIp(ip));
-                    if (!string.IsNullOrEmpty(regionCode))
-                    {
-                        _serverRegistry.Record(regionCode, ip, port);
-                        BeaconLog.Write($"LEARN  {regionCode}  {ip}:{port}  (known servers now: {_serverRegistry.TotalServers})");
-
-                        // Harvest the whole instance once: each GameLift box hosts several server
-                        // ports, so one connection can seed ~5 pool endpoints instead of 1.
-                        // (Active probing — only when live scanning is enabled.)
-                        bool firstSeen;
-                        lock (_harvestedIps) firstSeen = _harvestedIps.Add(ip);
-                        if (firstSeen && _liveServerScanning)
-                        {
-                            _ = Task.Run(async () =>
-                            {
-                                var ports = await LiveProbe.HarvestLivePortsAsync(ip);
-                                foreach (var p in ports) _serverRegistry.Record(regionCode, ip, p);
-                                BeaconLog.Write($"HARVEST {regionCode}  {ip} -> {ports.Count} live ports: {string.Join(",", ports)}");
-                            });
-                        }
-                    }
-                }
-                catch { /* learning is best-effort */ }
                 UpdateUi(regionName);
             }
             catch { /* Ignore if UI is gone */ }
@@ -906,7 +912,7 @@ namespace MakeYourChoice
         {
             // ── Form setup ────────────────────────────────────────────────
             Text            = "Make Your Choice (DbD Server Selector)";
-            Width           = 405;
+            Width           = 480;
             Height          = 585;
             StartPosition   = FormStartPosition.CenterScreen;
             Padding         = new Padding(10);
@@ -1184,8 +1190,9 @@ namespace MakeYourChoice
                 _lv,
                 new object[] { true }
             );
-            _lv.Columns.Add("Server",  220);
-            _lv.Columns.Add("Latency", 115);
+            _lv.Columns.Add("Server",  225);
+            _lv.Columns.Add("Latency", 85);
+            _lv.Columns.Add("Status",  95);
             var groupOrder = new (string Key, string Label)[]
             {
                 ("Europe", "Europe"),
@@ -1204,7 +1211,8 @@ namespace MakeYourChoice
                     ForeColor = Color.LightSlateGray, // Color for the region groups
                     Font = new Font(_lv.Font, FontStyle.Bold)
                 };
-                divider.SubItems.Add(string.Empty);
+                divider.SubItems.Add(string.Empty); // Latency
+                divider.SubItems.Add(string.Empty); // Status
                 _lv.Items.Add(divider);
 
                 foreach (var kv in _regions.Where(kv => GetGroupName(kv.Key) == key))
@@ -1222,7 +1230,9 @@ namespace MakeYourChoice
                         item.ForeColor = Color.Orange;
                         item.ToolTipText = "Unstable: issues may occur.";
                     }
-                    item.SubItems.Add("…");
+                    item.SubItems.Add("…");                       // Latency
+                    var statusSub = item.SubItems.Add("Unknown"); // Status
+                    statusSub.ForeColor = Color.Gray;
                     _lv.Items.Add(item);
                 }
             }
@@ -1252,15 +1262,44 @@ namespace MakeYourChoice
                 Margin = new Padding(0, 0, 0, 6)
             };
 
+            // Inline firewall-apply progress (hidden until an Enforced apply is writing firewall rules).
+            _pbFirewallProgress = new ProgressBar
+            {
+                Width = 170,
+                Height = 16,
+                Style = ProgressBarStyle.Marquee,
+                MarqueeAnimationSpeed = 25,
+                Margin = new Padding(0, 2, 0, 0)
+            };
+            _lblFirewallProgress = new Label
+            {
+                Text = "Writing firewall rules…",
+                AutoSize = true,
+                Margin = new Padding(8, 3, 0, 0),
+                Font = new Font(Font, FontStyle.Italic)
+            };
+            _flpFirewallProgress = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(5, 2, 5, 2),
+                Margin = new Padding(0),
+                WrapContents = false,
+                Visible = false
+            };
+            _flpFirewallProgress.Controls.Add(_pbFirewallProgress);
+            _flpFirewallProgress.Controls.Add(_lblFirewallProgress);
+
             var tlp = new TableLayoutPanel
             {
                 Dock        = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount    = 6
+                RowCount    = 7
             };
             tlp.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // menu
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // divider
+            tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // firewall progress
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // connected info
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // tip
             tlp.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // buttons
@@ -1268,9 +1307,10 @@ namespace MakeYourChoice
             tlp.Controls.Add(_lv,          0, 0);
             tlp.Controls.Add(_menuStrip,   0, 1);
             tlp.Controls.Add(menuDivider,  0, 2);
-            tlp.Controls.Add(flpConnection, 0, 3);
-            tlp.Controls.Add(_lblTip,      0, 4);
-            tlp.Controls.Add(_buttonPanel, 0, 5);
+            tlp.Controls.Add(_flpFirewallProgress, 0, 3);
+            tlp.Controls.Add(flpConnection, 0, 4);
+            tlp.Controls.Add(_lblTip,      0, 5);
+            tlp.Controls.Add(_buttonPanel, 0, 6);
 
             Controls.Add(tlp);
         }
@@ -1313,7 +1353,9 @@ namespace MakeYourChoice
 
         private void HandleCustomSplashArt()
         {
-            var gamePath = _gamePath?.Trim();
+            // Resolve the install root: the setting may hold a direct .exe path, which the firewall can
+            // use but content paths can't be built from.
+            var gamePath = GameInstalls.ResolveInstallRoot(_gamePath);
             if (string.IsNullOrWhiteSpace(gamePath))
             {
                 MessageBox.Show(
@@ -1444,7 +1486,9 @@ namespace MakeYourChoice
 
         private void HandleSkipTrailer()
         {
-            var gamePath = _gamePath?.Trim();
+            // Resolve the install root: the setting may hold a direct .exe path, which the firewall can
+            // use but content paths can't be built from.
+            var gamePath = GameInstalls.ResolveInstallRoot(_gamePath);
             if (string.IsNullOrWhiteSpace(gamePath))
             {
                 MessageBox.Show(
@@ -1695,22 +1739,26 @@ namespace MakeYourChoice
                             }
                             else
                             {
-                                var baseText = ms >= 0 ? $"{ms} ms" : "disconnected";
-                                // For unstable servers, show real online/offline from Dead by Queue.
-                                var code = AwsCodeForRegion(regionKey);
-                                if (!_regions[regionKey].Stable && code != null
-                                    && _dbqOnline.TryGetValue(code, out var online))
-                                {
-                                    sub.Text = baseText + (online ? "  ✓" : "  ⚠");
-                                    sub.ForeColor = online ? GetColorForLatency(ms) : Color.Orange;
-                                }
-                                else
-                                {
-                                    sub.Text = baseText;
-                                    sub.ForeColor = GetColorForLatency(ms);
-                                }
+                                sub.Text = ms >= 0 ? $"{ms} ms" : "disconnected";
+                                sub.ForeColor = GetColorForLatency(ms);
                             }
                             sub.Font      = new Font(sub.Font, FontStyle.Italic);
+
+                            // Status column: real online/offline for every server, sourced from Dead
+                            // by Queue plus recent live connections (resolved in _dbqOnline).
+                            if (item.SubItems.Count > 2)
+                            {
+                                var statusSub = item.SubItems[2];
+                                var code = AwsCodeForRegion(regionKey);
+                                bool? online = (code != null && _dbqOnline.TryGetValue(code, out var on))
+                                    ? on : (bool?)null;
+                                statusSub.Text = online == true ? "Online"
+                                               : online == false ? "Offline"
+                                               : "Unknown";
+                                statusSub.ForeColor = online == true ? Color.MediumSeaGreen
+                                                    : online == false ? Color.Crimson
+                                                    : Color.Gray;
+                            }
                         }
                     }
                     finally
@@ -2016,6 +2064,11 @@ namespace MakeYourChoice
 
         private async void BtnApply_Click(object sender, EventArgs e)
         {
+            // Enforced mode scopes its firewall rules to the DBD executables, so it cannot run without
+            // knowing where the game is. Check BEFORE touching anything: otherwise we'd rewrite the
+            // hosts file and only then fail at the firewall step, leaving a half-applied state.
+            if (!EnsureHardLockCanBeScoped()) return;
+
             // Check for conflicting entries before proceeding
             var conflicts = DetectConflictingEntries();
             if (conflicts.Count > 0)
@@ -2274,17 +2327,22 @@ namespace MakeYourChoice
                 // firewall rules we're about to apply).
                 SaveSettings();
 
-                // Hard region lock: when enabled, also firewall-block the game-server data plane of
-                // every region NOT chosen, so DBD's server-side fallback can't place you there.
+                // Enforced mode: also firewall-block the game-server data plane of every region NOT
+                // chosen, so DBD's server-side fallback can't place you there.
                 string lockNote = "";
                 var (lockOk, lockMsg) = await ReconcileHardLockAsync(allowedSet);
                 if (_useHardLock)
                     lockNote = lockOk
-                        ? "\n\nHard region lock applied. Unchosen servers' game traffic is firewall-blocked."
-                        : "\n\nHard region lock could NOT be applied: " + lockMsg;
+                        ? "\n\nFirewall enforcement applied: unchosen regions' game-server traffic is blocked."
+                        : "\n\nFirewall enforcement could NOT be applied: " + lockMsg;
+
+                // Enforced = Gatekeep hosts (steer matchmaking) + firewall (hard-block); plain Gatekeep = hosts only.
+                var header = _applyMode == ApplyMode.Enforced
+                    ? "Applied Enforced mode.\n\nYour hosts file was updated to steer matchmaking, and the firewall blocks unchosen regions."
+                    : "The hosts file was updated successfully (Gatekeep).";
 
                 MessageBox.Show(
-                    "The hosts file was updated successfully (Gatekeep)." + lockNote +
+                    header + lockNote +
                     "\n\nPlease restart the game in order for changes to take effect.",
                     "Success",
                     MessageBoxButtons.OK,
@@ -2653,9 +2711,20 @@ namespace MakeYourChoice
                 Width = 320,
                 Margin = new Padding(3, 3, 3, 10)
             };
-            cbApplyMode.Items.AddRange(new[] { "Gatekeep (default)", "Universal Redirect (deprecated)" });
-            cbApplyMode.SelectedIndex = _applyMode == ApplyMode.UniversalRedirect ? 1 : 0;
-            
+            // Enforced is the firewall method — a selectable apply mode rather than a separate checkbox.
+            // Index 0 = Gatekeep, 1 = Enforced (Gatekeep + firewall), 2 = Universal Redirect.
+            cbApplyMode.Items.AddRange(new[] { "Gatekeep (default)", "Enforced (firewall)", "Universal Redirect (deprecated)" });
+            cbApplyMode.SelectedIndex =
+                _applyMode == ApplyMode.UniversalRedirect ? 2 :
+                _applyMode == ApplyMode.Enforced ? 1 : 0;
+            var toolTipMode = new ToolTip();
+            toolTipMode.SetToolTip(cbApplyMode,
+                "Gatekeep edits your hosts file to steer matchmaking away from unchosen regions.\n" +
+                "Enforced (firewall) does the same and also adds a Windows Firewall rule that blocks unchosen " +
+                "regions' game servers — more reliable for solo unstable picks, but you can't connect elsewhere if your " +
+                "pick is offline. With 'Merge unstable servers' on, the similar stable servers stay allowed too.\n" +
+                "Universal Redirect is deprecated.");
+
             var lblModeNotice = new Label
             {
                 Text = "After changing this setting, reapply your selection to apply changes.",
@@ -2683,7 +2752,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 6
+                RowCount = 4
             };
 
             var rbBoth = new RadioButton { Text = "Block both (default)", AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
@@ -2701,22 +2770,10 @@ namespace MakeYourChoice
             var toolTipMerge = new ToolTip();
             toolTipMerge.SetToolTip(cbMergeUnstable, "Merge unstable servers with a stable alternative. (recommended)");
 
-            var cbHardLock = new CheckBox
-            {
-                Text = "Use hard region lock (firewall) to force exclude unchosen servers",
-                AutoSize = true,
-                Checked = _useHardLock,
-                MaximumSize = new Size(320, 0),
-                Margin = new Padding(3, 8, 3, 3)
-            };
-            var toolTipHardLock = new ToolTip();
-            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline. With 'Merge unstable servers' also on, the similar stable servers stay allowed too. Everything else is blocked.");
-
             tlpBlock.Controls.Add(rbBoth, 0, 0);
             tlpBlock.Controls.Add(rbPing, 0, 1);
             tlpBlock.Controls.Add(rbService, 0, 2);
             tlpBlock.Controls.Add(cbMergeUnstable, 0, 3);
-            tlpBlock.Controls.Add(cbHardLock, 0, 4);
             blockPanel.Controls.Add(tlpBlock);
 
             // Initialize selections
@@ -2725,12 +2782,13 @@ namespace MakeYourChoice
             rbService.Checked = _blockMode == BlockMode.OnlyService;
 
             // Logic for enabling/disabling controls
+            // Both Gatekeep (0) and Hard region lock (1) are gatekeep-based, so the block options apply
+            // to them; only Universal Redirect (2) disables them.
             cbApplyMode.SelectedIndexChanged += (s, e) =>
             {
-                bool isGatekeep = cbApplyMode.SelectedIndex == 0;
-                blockPanel.Enabled = isGatekeep;
+                blockPanel.Enabled = cbApplyMode.SelectedIndex != 2;
             };
-            blockPanel.Enabled = (cbApplyMode.SelectedIndex == 0);
+            blockPanel.Enabled = (cbApplyMode.SelectedIndex != 2);
 
 
             // Confirm before disabling merge option
@@ -2768,7 +2826,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 3
+                RowCount = 1
             };
             var cbDarkMode = new CheckBox
             {
@@ -2804,59 +2862,8 @@ namespace MakeYourChoice
             };
             var toolTipStartup = new ToolTip();
             toolTipStartup.SetToolTip(cbStartup, "Launch Make Your Choice automatically when you log in (as a scheduled task, so it starts elevated without a UAC prompt).");
-            var cbLiveScan = new CheckBox
-            {
-                Text = "Live server scanning",
-                AutoSize = true,
-                Checked = _liveServerScanning,
-                Margin = new Padding(3, 3, 3, 3)
-            };
-            var toolTipLiveScan = new ToolTip();
-            toolTipLiveScan.SetToolTip(cbLiveScan, "Actively ping known DBD game servers to detect in real time when an unstable region is really online (faster than Dead by Queue). Turn off to send no probe traffic and rely only on Dead by Queue plus servers you actually connect to.");
-            var cbDebug = new CheckBox
-            {
-                Text = "Debug (beacon log)",
-                AutoSize = true,
-                Checked = _debugBeacon,
-                Margin = new Padding(3, 3, 3, 3)
-            };
-            var toolTipDebug = new ToolTip();
-            toolTipDebug.SetToolTip(cbDebug, "Write verbose beacon diagnostics to %LOCALAPPDATA%\\MakeYourChoice\\beacon-log.txt and show live-server count + Dead by Queue data age in the tray tooltip. For tuning.");
-            var lblPoll = new Label
-            {
-                Text = "Server status poll interval (sec):",
-                AutoSize = true,
-                Margin = new Padding(3, 7, 3, 3)
-            };
-            var nudPollInterval = new NumericUpDown
-            {
-                Minimum = 5,
-                Maximum = 600,
-                Increment = 5,
-                Value = Math.Min(600, Math.Max(5, _pollIntervalSeconds)),
-                Width = 64,
-                Margin = new Padding(3, 4, 3, 3)
-            };
-            var toolTipPoll = new ToolTip();
-            toolTipPoll.SetToolTip(nudPollInterval, "How often the Dead by Queue server status is checked (seconds). Higher is lighter on the network; lower notices a server coming online sooner. Default 30.");
-            var pollPanel = new FlowLayoutPanel
-            {
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false,
-                Margin = new Padding(0)
-            };
-            pollPanel.Controls.Add(lblPoll);
-            pollPanel.Controls.Add(nudPollInterval);
-
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
-            tlpExperimental.Controls.Add(cbLiveScan, 0, 1);
-            tlpExperimental.Controls.Add(cbDebug, 0, 2);
             experimentalPanel.Controls.Add(tlpExperimental);
-
-            // Server status poll interval now lives under Gatekeep Options.
-            tlpBlock.Controls.Add(pollPanel, 0, 5);
 
             // ── App ────────────────────────────────────────────────────
             var appPanel = new GroupBox
@@ -2981,18 +2988,14 @@ namespace MakeYourChoice
             };
             btnDefault.Click += (s, e) =>
             {
-                cbApplyMode.SelectedIndex = 0;
+                cbApplyMode.SelectedIndex = 0; // Gatekeep, hard-lock firewall off
                 rbBoth.Checked = true;
                 cbMergeUnstable.Checked = true;
-                cbHardLock.Checked = false;
                 tbGamePath.Text = string.Empty;
                 cbDarkMode.Checked = false;
                 cbMinimizeTray.Checked = true;
                 cbNotifyOnline.Checked = false;
                 cbStartup.Checked = false;
-                cbLiveScan.Checked = false;
-                cbDebug.Checked = false;
-                nudPollInterval.Value = 30;
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
@@ -3017,10 +3020,16 @@ namespace MakeYourChoice
                 if (!string.IsNullOrEmpty(gamePathText))
                 {
                     var name = Path.GetFileName(gamePathText.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                    if (!string.Equals(name, "Dead by Daylight", StringComparison.Ordinal))
+                    // Accept the install folder, or a direct path to one of the storefront binaries —
+                    // the latter is the only route for installs we can't browse to (e.g. WindowsApps).
+                    bool isGameFolder = string.Equals(name, "Dead by Daylight", StringComparison.Ordinal);
+                    bool isGameExe = GameInstalls.ExeNames.Any(
+                        n => string.Equals(name, n, StringComparison.OrdinalIgnoreCase));
+                    if (!isGameFolder && !isGameExe)
                     {
                         MessageBox.Show(
-                            "Please select the folder named \"Dead by Daylight\".",
+                            "Please select the folder named \"Dead by Daylight\", or point directly at one of:\n\n" +
+                            string.Join("\n", GameInstalls.ExeNames),
                             "Invalid game folder",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Warning);
@@ -3028,37 +3037,57 @@ namespace MakeYourChoice
                     }
                 }
 
+                // Enforced mode writes firewall rules scoped to the DBD executables, so it can't be
+                // saved without a game path we can actually resolve one from. Keep the dialog open:
+                // the game-folder field is right here, so the user can fix it without navigating away.
+                if (cbApplyMode.SelectedIndex == 1 && GameInstalls.Find(gamePathText).Count == 0)
+                {
+                    MessageBox.Show(
+                        (string.IsNullOrEmpty(gamePathText)
+                            ? "Enforced mode needs your game folder so the firewall rules can be limited to Dead by Daylight."
+                            : $"No Dead by Daylight executable was found in:\n\n{gamePathText}") +
+                        "\n\nWithout it the rules would have to block every app on this PC.\n\n" +
+                        "Set the game folder below, or choose a different method.",
+                        "Game folder required for Enforced mode",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    tbGamePath.Focus();
+                    return;
+                }
+
                 bool darkModeChanged = _darkMode != cbDarkMode.Checked;
-                _applyMode = cbApplyMode.SelectedIndex == 1 ? ApplyMode.UniversalRedirect : ApplyMode.Gatekeep;
-                if (_applyMode == ApplyMode.Gatekeep)
+                bool oldHardLock = _useHardLock; // capture before _applyMode changes (it's derived)
+                // Method dropdown: 0 = Gatekeep, 1 = Enforced (Gatekeep + firewall), 2 = Universal Redirect.
+                _applyMode = cbApplyMode.SelectedIndex switch
+                {
+                    2 => ApplyMode.UniversalRedirect,
+                    1 => ApplyMode.Enforced,
+                    _ => ApplyMode.Gatekeep,
+                };
+                // Block options apply to every gatekeep-based method (Gatekeep and Enforced).
+                if (_applyMode != ApplyMode.UniversalRedirect)
                 {
                     if (rbBoth.Checked)       _blockMode = BlockMode.Both;
                     else if (rbPing.Checked)  _blockMode = BlockMode.OnlyPing;
                     else                      _blockMode = BlockMode.OnlyService;
                 }
                 bool mergeChanged = _mergeUnstable != cbMergeUnstable.Checked;
-                bool hardLockChanged = _useHardLock != cbHardLock.Checked;
-                bool hardLockTurnedOff = _useHardLock && !cbHardLock.Checked;
+                bool hardLockChanged = oldHardLock != _useHardLock;
+                bool hardLockTurnedOff = oldHardLock && !_useHardLock;
                 _mergeUnstable = cbMergeUnstable.Checked;
-                _useHardLock = cbHardLock.Checked;
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
                 _minimizeToTray = cbMinimizeTray.Checked;
                 _notifyServerOnline = cbNotifyOnline.Checked;
-                _liveServerScanning = cbLiveScan.Checked;
-                _debugBeacon = cbDebug.Checked;
-                BeaconLog.Enabled = _debugBeacon;
-                _pollIntervalSeconds = (int)nudPollInterval.Value;
-                ApplyPollInterval();
                 bool startupChanged = _startWithWindows != cbStartup.Checked;
                 _startWithWindows = cbStartup.Checked;
                 SaveSettings();
                 if (startupChanged) SetAutoStart(_startWithWindows);
 
-                // Keep the backend in sync with the UI on demand: if a Gatekeep selection is
-                // already applied and Merge or the hard lock changed, re-apply now so the hosts
+                // Keep the backend in sync with the UI on demand: if a gatekeep-based selection is
+                // already applied and Merge or the firewall lock changed, re-apply now so the hosts
                 // entries and firewall rules match — no need to click Apply or Revert to Default.
-                if (_applyMode == ApplyMode.Gatekeep && (mergeChanged || hardLockChanged) && IsHostsSectionActive())
+                if (_applyMode != ApplyMode.UniversalRedirect && (mergeChanged || hardLockChanged) && IsHostsSectionActive())
                     _ = ReapplyGatekeepSilentlyAsync();
                 else if (hardLockTurnedOff)
                     FirewallManager.RemoveLock();
@@ -3143,9 +3172,9 @@ namespace MakeYourChoice
 
                 File.WriteAllText(HostsPath, defaultHosts);
 
-                // Reverting to default also clears the hard region lock's firewall rules.
+                // Reverting to default also clears the firewall rules; drop Enforced back to Gatekeep.
                 FirewallManager.RemoveLock();
-                _useHardLock = false;
+                if (_applyMode == ApplyMode.Enforced) _applyMode = ApplyMode.Gatekeep;
                 SaveSettings();
 
                 // Attempt to flush DNS (best effort)
