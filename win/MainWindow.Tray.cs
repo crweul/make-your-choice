@@ -5,10 +5,11 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using System.Windows.Threading;
 
 namespace MakeYourChoice
 {
-    public partial class Form1
+    public partial class MainWindow
     {
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr handle);
@@ -20,7 +21,7 @@ namespace MakeYourChoice
         private IntPtr _trayHandle = IntPtr.Zero;
         private Bitmap _appIconBmp;
         private ContextMenuStrip _trayMenu;
-        private Timer _dbqTimer;
+        private DispatcherTimer _dbqTimer;
         private bool _minimizeBalloonShown;
         private bool _exiting;
         // For offline -> online notifications: the preferred region and its last seen online state.
@@ -76,7 +77,7 @@ namespace MakeYourChoice
             // Single poll: refresh real online/offline + queue from Dead by Queue, then update the
             // tray. Dead by Queue is the status source; the sniffer's recent-connection signal
             // overrides it for the region you are actually playing on.
-            _dbqTimer = new Timer { Interval = PollIntervalSeconds * 1000 };
+            _dbqTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(PollIntervalSeconds) };
             _dbqTimer.Tick += async (_, __) => await RefreshStatusAsync();
             _dbqTimer.Start();
             _ = RefreshStatusAsync(); // immediate first fetch
@@ -131,7 +132,7 @@ namespace MakeYourChoice
         // Poll Dead by Queue for real online/offline status + queue time, and update the tray.
         private async System.Threading.Tasks.Task RefreshStatusAsync()
         {
-            if (_exiting || IsDisposed || _tray == null) return;
+            if (_exiting || _closed || _tray == null) return;
 
             var (status, dataUnix) = await DbqClient.GetRegionStatusAsync();
             if (status.Count > 0)
@@ -143,7 +144,7 @@ namespace MakeYourChoice
             // Resolve the displayed status: recent live > DBQ.
             ResolveStatuses();
 
-            if (_exiting || IsDisposed || _tray == null) return;
+            if (_exiting || _closed || _tray == null) return;
 
             var preferred = GetPreferredRegionKey();
             if (preferred == null)
@@ -175,7 +176,7 @@ namespace MakeYourChoice
                 queueText = min >= 0 ? qt : "";
                 _lastQueueText = queueText;
             }
-            if (_exiting || IsDisposed || _tray == null) return;
+            if (_exiting || _closed || _tray == null) return;
 
             // Notify on an offline -> online transition for the same preferred region.
             if (_notifyServerOnline
@@ -206,17 +207,13 @@ namespace MakeYourChoice
             _tray.Text = Trunc($"{shortName}: {state}{queue}{src}{dbg}");
         }
 
-        // The region the tray reports on: first checked unstable region, else first checked region.
+        // The region the tray reports on: the first checked region.
         private string GetPreferredRegionKey()
         {
-            if (_lv == null || _lv.IsDisposed) return null;
-            var checkedKeys = _lv.CheckedItems.Cast<ListViewItem>()
-                .Select(i => i.Tag as string)
-                .Where(s => s != null && _regions.ContainsKey(s))
-                .ToList();
-            if (checkedKeys.Count == 0) return null;
-            var unstable = checkedKeys.FirstOrDefault(k => !_regions[k].Stable);
-            return unstable ?? checkedKeys[0];
+            return RegionRowsOnly()
+                .Where(r => r.IsChecked && _regions.ContainsKey(r.Key))
+                .Select(r => r.Key)
+                .FirstOrDefault();
         }
 
         private static string Trunc(string s) => s != null && s.Length > 120 ? s.Substring(0, 119) + "…" : s;
@@ -227,7 +224,7 @@ namespace MakeYourChoice
             IntPtr h = bmp.GetHicon();
             try
             {
-                _tray.Icon = Icon.FromHandle(h);
+                _tray.Icon = System.Drawing.Icon.FromHandle(h);
                 if (_trayHandle != IntPtr.Zero) DestroyIcon(_trayHandle);
                 _trayHandle = h;
             }
@@ -282,30 +279,26 @@ namespace MakeYourChoice
 
         // Minimize-to-tray: when enabled, minimizing hides the window (and its taskbar button);
         // the tray icon remains. Otherwise it behaves like a normal taskbar minimize.
-        protected override void OnResize(EventArgs e)
+        private void MinimizeToTrayIfEnabled()
         {
-            base.OnResize(e);
-            if (_minimizeToTray && WindowState == FormWindowState.Minimized && _tray != null)
+            if (!_minimizeToTray || _tray == null) return;
+            Hide();
+            if (!_minimizeBalloonShown)
             {
-                Hide();
-                if (!_minimizeBalloonShown)
-                {
-                    _minimizeBalloonShown = true;
-                    _tray.BalloonTipTitle = "Make Your Choice";
-                    _tray.BalloonTipText = "Still running in the system tray. Double-click to restore.";
-                    try { _tray.ShowBalloonTip(2000); } catch { }
-                }
+                _minimizeBalloonShown = true;
+                _tray.BalloonTipTitle = "Make Your Choice";
+                _tray.BalloonTipText = "Still running in the system tray. Double-click to restore.";
+                try { _tray.ShowBalloonTip(2000); } catch { }
             }
         }
 
         private void RestoreFromTray()
         {
-            if (IsDisposed) return;
+            if (_closed) return;
             Show();
-            WindowState = FormWindowState.Normal;
+            WindowState = System.Windows.WindowState.Normal;
             ShowInTaskbar = true;
             Activate();
-            BringToFront();
         }
 
         private void ExitFromTray()
@@ -317,7 +310,7 @@ namespace MakeYourChoice
         private void DisposeTray()
         {
             _exiting = true;
-            try { _dbqTimer?.Stop(); _dbqTimer?.Dispose(); } catch { }
+            try { _dbqTimer?.Stop(); } catch { }
             if (_tray != null) { _tray.Visible = false; _tray.Dispose(); _tray = null; }
             if (_trayHandle != IntPtr.Zero) { DestroyIcon(_trayHandle); _trayHandle = IntPtr.Zero; }
             _appIconBmp?.Dispose();

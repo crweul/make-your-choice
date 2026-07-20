@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-        <!-- target .NET 10 on Windows with WinForms -->
+        <!-- target .NET 10 on Windows with WPF (WPF-UI Fluent) + WinForms (tray NotifyIcon) -->
         <TargetFramework>net10.0-windows</TargetFramework>
-        <ApplicationHighDpiMode>DpiUnaware</ApplicationHighDpiMode>
+        <UseWPF>true</UseWPF>
         <UseWindowsForms>true</UseWindowsForms>
         <OutputType>WinExe</OutputType>
         <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -21,27 +21,15 @@
         <ApplicationManifest>app.manifest</ApplicationManifest>
         <ApplicationIcon>icon.ico</ApplicationIcon>
 
-        <!-- size optimization -->
+        <!-- size optimization (trimming is not supported by WPF) -->
         <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-        <PublishTrimmed>true</PublishTrimmed>
-        <TrimMode>partial</TrimMode>
         <InvariantGlobalization>false</InvariantGlobalization>
-        <DebuggerSupport>false</DebuggerSupport>
-        <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
-        <EventSourceSupport>false</EventSourceSupport>
-        <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
+        <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+        <DebugType>embedded</DebugType>
     </PropertyGroup>
 
     <ItemGroup>
         <Content Include="icon.ico">
-            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-        </Content>
-        <Content Include="..\shared\star.svg">
-            <Link>star.svg</Link>
-            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-        </Content>
-        <Content Include="..\shared\kofi.svg">
-            <Link>kofi.svg</Link>
             <CopyToOutputDirectory>Always</CopyToOutputDirectory>
         </Content>
         <EmbeddedResource Include="..\VERSINF.yml">
@@ -50,9 +38,6 @@
     </ItemGroup>
     <ItemGroup>
         <PackageReference Include="YamlDotNet" Version="16.2.1" />
-        <PackageReference Include="Svg" Version="3.4.7" />
-    </ItemGroup>
-    <ItemGroup>
-        <TrimmerRootAssembly Include="System.Diagnostics.Process" />
+        <PackageReference Include="WPF-UI" Version="4.3.0" />
     </ItemGroup>
 </Project>

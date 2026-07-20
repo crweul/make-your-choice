@@ -1,9 +1,1 @@
 version: v2.9-b
-notes:
-  - "Hard Region Lock (firewall)."
-  - "Live server status."
-  - "Minimize to system tray."
-  - "Notifications when your preferred server comes online."
-  - "Configurable status poll interval."
-  - "Your region selection is remembered across launches."
-  - "Backend consistency when resetting to default, applying with no boxes selected, or changing firewall/merge settings."

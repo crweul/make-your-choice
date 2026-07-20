@@ -27,7 +27,7 @@ namespace MakeYourChoice
                 var localIp = GetLocalIP();
                 if (localIp == null)
                 {
-                    MessageBox.Show("Sniffer Error: Could not find a valid local IPv4 address with an active gateway.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Dialogs.Show(null, "Sniffer Error: Could not find a valid local IPv4 address with an active gateway.", "Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
                     return;
                 }
 
@@ -48,7 +48,7 @@ namespace MakeYourChoice
                 catch (SocketException)
                 {
                      // This often happens if not running as admin or on some specific network setups
-                     MessageBox.Show("Sniffer Error: Could not set IOControl ReceiveAll. Ensure you are running as Administrator.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                     Dialogs.Show(null, "Sniffer Error: Could not set IOControl ReceiveAll. Ensure you are running as Administrator.", "Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
                      return;
                 }
 
