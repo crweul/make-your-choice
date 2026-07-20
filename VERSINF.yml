@@ -1,3 +1,1 @@
-version: v2.8
-notes:
-  - Fixed potential crash when launching MakeYourChoice while in game on Windows.
+version: v2.9-b

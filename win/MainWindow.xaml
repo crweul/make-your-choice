@@ -1,0 +1,457 @@
+<ui:FluentWindow x:Class="MakeYourChoice.MainWindow"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 xmlns:local="clr-namespace:MakeYourChoice"
+                 Title="Make Your Choice"
+                 Width="700" Height="680" ResizeMode="CanMinimize"
+                 MinWidth="700" MaxWidth="700" MinHeight="680" MaxHeight="680"
+                 WindowStartupLocation="CenterScreen"
+                 ExtendsContentIntoTitleBar="True"
+                 WindowBackdropType="Mica"
+                 WindowCornerPreference="Round"
+                 Closing="OnWindowClosing"
+                 StateChanged="OnWindowStateChanged">
+
+    <ui:FluentWindow.Resources>
+        <!-- Brand buttons (Ko-fi / GitHub), same corner radius as the standard buttons -->
+        <Style x:Key="BrandButton" TargetType="Button">
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border CornerRadius="4" Background="{TemplateBinding Background}" SnapsToDevicePixels="True">
+                            <Grid>
+                                <Border x:Name="Tint" CornerRadius="4" Background="White" Opacity="0" />
+                                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Tint" Property="Opacity" Value="0.16" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Tint" Property="Opacity" Value="0.30" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Windows 11 settings-style section card -->
+        <Style x:Key="SectionCard" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource ControlFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="14,12" />
+            <Setter Property="Margin" Value="0,0,0,12" />
+        </Style>
+
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="2,0,0,6" />
+        </Style>
+    </ui:FluentWindow.Resources>
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- ── Sidebar ─────────────────────────────────────────────── -->
+        <Border x:Name="Sidebar" Grid.Column="0" Width="148"
+                WindowChrome.IsHitTestVisibleInChrome="True"
+                Background="{DynamicResource ControlFillColorDefaultBrush}"
+                BorderThickness="0,0,1,0"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+            <Grid Margin="10,12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0">
+                    <ui:Button x:Name="NavServers" Appearance="Primary" Click="OnNavServers" Margin="0,0,0,8"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
+                        <StackPanel>
+                            <TextBlock Text="&#xE774;" FontFamily="Segoe Fluent Icons" FontSize="20"
+                                       HorizontalAlignment="Center" />
+                            <TextBlock Text="Servers" Margin="0,4,0,0" HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </ui:Button>
+                    <ui:Button x:Name="NavMisc" Appearance="Secondary" Click="OnNavMisc" Margin="0,0,0,8"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
+                        <StackPanel>
+                            <TextBlock Text="&#xE712;" FontFamily="Segoe Fluent Icons" FontSize="20"
+                                       HorizontalAlignment="Center" />
+                            <TextBlock Text="Misc" Margin="0,4,0,0" HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </ui:Button>
+                    <ui:Button x:Name="NavOptions" Appearance="Secondary" Click="OnNavOptions"
+                               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center">
+                        <StackPanel>
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe Fluent Icons" FontSize="20"
+                                       HorizontalAlignment="Center" />
+                            <TextBlock Text="Options" Margin="0,4,0,0" HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </ui:Button>
+                </StackPanel>
+
+                <StackPanel Grid.Row="1" Margin="0,12,0,4">
+                    <Button x:Name="KofiButton" Click="OnKofi" Background="#FFFF5E5B" Margin="0,0,0,8"
+                            HorizontalAlignment="Stretch" Style="{StaticResource BrandButton}"
+                            ToolTip="Support me through Ko-fi">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Width="15" Height="15" Stretch="Uniform" Fill="White" VerticalAlignment="Center"
+                                  Data="M11.351 2.715c-2.7 0-4.986.025-6.83.26C2.078 3.285 0 5.154 0 8.61c0 3.506.182 6.13 1.585 8.493 1.584 2.701 4.233 4.182 7.662 4.182h.83c4.209 0 6.494-2.234 7.637-4a9.5 9.5 0 0 0 1.091-2.338C21.792 14.688 24 12.22 24 9.208v-.415c0-3.247-2.13-5.507-5.792-5.87-1.558-.156-2.65-.208-6.857-.208m0 1.947c4.208 0 5.09.052 6.571.182 2.624.311 4.13 1.584 4.13 4v.39c0 2.156-1.792 3.844-3.87 3.844h-.935l-.156.649c-.208 1.013-.597 1.818-1.039 2.546-.909 1.428-2.545 3.064-5.922 3.064h-.805c-2.571 0-4.831-.883-6.078-3.195-1.09-2-1.298-4.155-1.298-7.506 0-2.181.857-3.402 3.012-3.714 1.533-.233 3.559-.26 6.39-.26m6.547 2.287c-.416 0-.65.234-.65.546v2.935c0 .311.234.545.65.545 1.324 0 2.051-.754 2.051-2s-.727-2.026-2.052-2.026m-10.39.182c-1.818 0-3.013 1.48-3.013 3.142 0 1.533.858 2.857 1.949 3.897.727.701 1.87 1.429 2.649 1.896a1.47 1.47 0 0 0 1.507 0c.78-.467 1.922-1.195 2.623-1.896 1.117-1.039 1.974-2.364 1.974-3.897 0-1.662-1.247-3.142-3.039-3.142-1.065 0-1.792.545-2.338 1.298-.493-.753-1.246-1.298-2.312-1.298" />
+                            <TextBlock Text="Ko-fi" Margin="8,0,0,0" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="GitHubButton" Click="OnGitHub" Background="#FF6E5494" Margin="0,0,0,14"
+                            HorizontalAlignment="Stretch" Style="{StaticResource BrandButton}"
+                            ToolTip="Open the public repository">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Width="15" Height="15" Stretch="Uniform" Fill="White" VerticalAlignment="Center"
+                                  Data="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+                            <TextBlock Text="GitHub" Margin="8,0,0,0" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <!-- App name + version; click to open About -->
+                    <Border x:Name="AboutArea" CornerRadius="4" Padding="6,5" Cursor="Hand"
+                            Background="Transparent"
+                            MouseLeftButtonUp="OnAbout"
+                            ToolTip="About Make Your Choice">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Setter Property="Background" Value="Transparent" />
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="{DynamicResource ControlFillColorSecondaryBrush}" />
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <StackPanel HorizontalAlignment="Center">
+                            <TextBlock Text="Make Your Choice" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                            <TextBlock x:Name="VersionText" Text="v0.0.0" HorizontalAlignment="Center"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </Border>
+                    <!-- Shown only when a newer release is available -->
+                    <ui:Button x:Name="UpdateButton" Appearance="Secondary" Click="OnUpdateNow" Visibility="Collapsed"
+                               Margin="0,10,0,0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                               ToolTip="A new version is available!">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE896;" FontFamily="Segoe Fluent Icons" VerticalAlignment="Center" />
+                            <TextBlock Text="Update" Margin="8,0,0,0" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </ui:Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ── Main column ─────────────────────────────────────────── -->
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Empty title bar (no app/file name) with the connection status chip on the left.
+                 The whole row also drags the window manually: WPF-UI's caption drag stops working
+                 once ResizeMode locks the window. -->
+            <Grid Grid.Row="0" Background="Transparent" MouseLeftButtonDown="OnTitleBarDrag">
+                <ui:TitleBar x:Name="AppTitleBar" Title="" ShowMaximize="False" Height="50"
+                             Background="{DynamicResource LayerFillColorDefaultBrush}">
+                    <ui:TitleBar.Resources>
+                        <!-- Full-height caption buttons, same approach as Aero Cut -->
+                        <Style TargetType="{x:Type ui:TitleBarButton}"
+                               BasedOn="{StaticResource {x:Type ui:TitleBarButton}}">
+                            <Setter Property="Width" Value="46" />
+                            <Setter Property="Height" Value="50" />
+                            <Setter Property="VerticalAlignment" Value="Stretch" />
+                        </Style>
+                    </ui:TitleBar.Resources>
+                </ui:TitleBar>
+                <Border CornerRadius="4" Padding="10,5" Margin="14,0,0,0"
+                        HorizontalAlignment="Left" VerticalAlignment="Center"
+                        Background="{DynamicResource ControlFillColorDefaultBrush}"
+                        BorderThickness="1" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="ConnectionDot" Text="⬤" FontSize="10" VerticalAlignment="Center"
+                                   Foreground="LightSlateGray" Margin="0,1,7,0" />
+                        <TextBlock Text="Connected to: " FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock x:Name="ConnectedValue" Text="Waiting for match…" FontStyle="Italic"
+                                   VerticalAlignment="Center" MaxWidth="240"
+                                   TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- ── Servers tab ─────────────────────────────────────── -->
+            <Grid x:Name="ServersPanel" Grid.Row="1" Margin="16,8,16,16">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" CornerRadius="8"
+                        Background="{DynamicResource ControlFillColorDefaultBrush}"
+                        BorderThickness="1" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0" Margin="14,10,14,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="110" />
+                                <ColumnDefinition Width="95" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Server" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="Latency" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Column="2" Text="Status" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom"
+                                Background="{DynamicResource CardStrokeColorDefaultBrush}" />
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,4,0,4">
+                            <ItemsControl x:Name="RegionList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type local:RegionRow}">
+                                        <Grid Margin="14,0,14,0">
+                                            <!-- group divider -->
+                                            <TextBlock x:Name="DividerRow" Text="{Binding Display}"
+                                                       FontWeight="Bold" Foreground="LightSlateGray"
+                                                       Margin="0,8,0,4" Visibility="Collapsed" />
+                                            <!-- region row -->
+                                            <Grid x:Name="RegionRowGrid">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="110" />
+                                                    <ColumnDefinition Width="95" />
+                                                </Grid.ColumnDefinitions>
+                                                <CheckBox Grid.Column="0" IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                                                          Content="{Binding Display}"
+                                                          Margin="0,1,0,1" MinHeight="0" Padding="8,0,0,0" />
+                                                <TextBlock Grid.Column="1" Text="{Binding LatencyText}" FontStyle="Italic"
+                                                           Foreground="{Binding LatencyBrush}" VerticalAlignment="Center" />
+                                                <TextBlock Grid.Column="2" Text="{Binding StatusText}"
+                                                           Foreground="{Binding StatusBrush}" VerticalAlignment="Center" />
+                                            </Grid>
+                                        </Grid>
+                                        <DataTemplate.Triggers>
+                                            <DataTrigger Binding="{Binding IsDivider}" Value="True">
+                                                <Setter TargetName="DividerRow" Property="Visibility" Value="Visible" />
+                                                <Setter TargetName="RegionRowGrid" Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Grid>
+                </Border>
+
+                <TextBlock Grid.Row="1" Margin="2,10,0,0" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           Text="Tip: You can select multiple servers. The game will decide which one to use based on latency." />
+
+                <Grid Grid.Row="2" Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <!-- Firewall-apply progress: fills whatever space the buttons leave over -->
+                    <Grid x:Name="FirewallProgressPanel" Grid.Column="0" Margin="2,0,14,0"
+                          VerticalAlignment="Center" Visibility="Collapsed">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Writing firewall rules…" VerticalAlignment="Center"
+                                   Margin="0,0,10,0"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <ProgressBar Grid.Column="1" IsIndeterminate="True" Height="6"
+                                     VerticalAlignment="Center" HorizontalAlignment="Stretch" />
+                    </Grid>
+                    <ui:Button Grid.Column="1" Content="Revert to Default" Click="OnRevert" />
+                    <ui:Button Grid.Column="2" Content="Apply Selection" Appearance="Primary" Margin="8,0,0,0" Click="OnApply" />
+                </Grid>
+            </Grid>
+
+            <!-- ── Misc tab ────────────────────────────────────────── -->
+            <!-- Right margin lives inside the ScrollViewer so the overlay scrollbar floats in its
+                 own gutter instead of on top of the cards -->
+            <ScrollViewer x:Name="MiscPanel" Grid.Row="1" Margin="16,8,4,16" Visibility="Collapsed"
+                          VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="0,0,12,0">
+                    <TextBlock Text="Game" Style="{StaticResource SectionHeader}" />
+                    <ui:CardAction Margin="0,0,0,8" IsChevronVisible="False" Click="OnCustomSplash">
+                        <ui:CardAction.Icon>
+                            <ui:FontIcon Glyph="&#xE8B9;" FontFamily="Segoe Fluent Icons" />
+                        </ui:CardAction.Icon>
+                        <StackPanel>
+                            <TextBlock Text="Custom splash art" />
+                            <TextBlock Text="Use custom artwork for the EAC splash screen." FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardAction>
+                    <ui:CardAction Margin="0,0,0,12" IsChevronVisible="False" Click="OnSkipTrailer">
+                        <ui:CardAction.Icon>
+                            <ui:FontIcon Glyph="&#xE714;" FontFamily="Segoe Fluent Icons" />
+                        </ui:CardAction.Icon>
+                        <StackPanel>
+                            <TextBlock Text="Auto-skip loading screen trailer" />
+                            <TextBlock Text="Skip the chapter trailer that plays on launch." FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardAction>
+
+                    <TextBlock Text="Hosts file" Style="{StaticResource SectionHeader}" />
+                    <ui:CardAction Margin="0,0,0,8" IsChevronVisible="False" Click="OnOpenHostsFolder">
+                        <ui:CardAction.Icon>
+                            <ui:FontIcon Glyph="&#xE838;" FontFamily="Segoe Fluent Icons" />
+                        </ui:CardAction.Icon>
+                        <StackPanel>
+                            <TextBlock Text="Open hosts file location" />
+                            <TextBlock Text="Open the drivers\etc folder in Explorer." FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardAction>
+                    <ui:CardAction Margin="0,0,0,12" IsChevronVisible="False" Click="OnResetHosts">
+                        <ui:CardAction.Icon>
+                            <ui:FontIcon Glyph="&#xE7A7;" FontFamily="Segoe Fluent Icons" />
+                        </ui:CardAction.Icon>
+                        <StackPanel>
+                            <TextBlock Text="Reset hosts file" />
+                            <TextBlock Text="Restore the Windows default hosts file." FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardAction>
+
+                    <TextBlock Text="App" Style="{StaticResource SectionHeader}" />
+                    <ui:CardAction Margin="0,0,0,8" IsChevronVisible="False" Click="OnCheckUpdates">
+                        <ui:CardAction.Icon>
+                            <ui:FontIcon Glyph="&#xE895;" FontFamily="Segoe Fluent Icons" />
+                        </ui:CardAction.Icon>
+                        <StackPanel>
+                            <TextBlock Text="Check for updates" />
+                            <TextBlock Text="See if a newer release is available." FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardAction>
+                    <ui:CardAction Margin="0,0,0,8" IsChevronVisible="False" Click="OnDiscord">
+                        <ui:CardAction.Icon>
+                            <ui:FontIcon Glyph="&#xE8F2;" FontFamily="Segoe Fluent Icons" />
+                        </ui:CardAction.Icon>
+                        <StackPanel>
+                            <TextBlock Text="Discord" />
+                            <TextBlock Text="Get support on the Discord server." FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardAction>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- ── Options tab ─────────────────────────────────────── -->
+            <ScrollViewer x:Name="OptionsPanel" Grid.Row="1" Margin="16,8,4,16" Visibility="Collapsed"
+                          VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="0,0,12,0">
+                    <TextBlock Text="Method" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource SectionCard}">
+                        <StackPanel>
+                            <ComboBox x:Name="CbApplyMode" HorizontalAlignment="Stretch"
+                                      SelectionChanged="OnApplyModeChanged"
+                                      ToolTip="Gatekeep edits your hosts file to steer matchmaking away from unchosen regions.&#x0a;Enforced (firewall) does the same and also adds a Windows Firewall rule that blocks unchosen regions' game servers — but you can't connect elsewhere if your pick is offline.&#x0a;Universal Redirect is deprecated.">
+                                <ComboBoxItem Content="Gatekeep (default)" />
+                                <ComboBoxItem Content="Enforced (firewall)" />
+                                <ComboBoxItem Content="Universal Redirect (deprecated)" />
+                            </ComboBox>
+                            <TextBlock Text="After changing this setting, reapply your selection to apply changes."
+                                       Margin="0,8,0,0" TextWrapping="Wrap" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="Gatekeep options" Style="{StaticResource SectionHeader}" />
+                    <Border x:Name="GatekeepCard" Style="{StaticResource SectionCard}">
+                        <StackPanel>
+                            <RadioButton x:Name="RbBoth" Content="Block both (default)" GroupName="BlockMode" />
+                            <RadioButton x:Name="RbPing" Content="Block UDP ping beacon endpoints" GroupName="BlockMode" />
+                            <RadioButton x:Name="RbService" Content="Block service endpoints" GroupName="BlockMode" />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="App" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource SectionCard}">
+                        <StackPanel>
+                            <ui:ToggleSwitch x:Name="TsMinTray" Content="Minimize to system tray"
+                                             ToolTip="When minimized, hide to the system tray instead of the taskbar. The tray icon shows your preferred server's online status." />
+                            <ui:ToggleSwitch x:Name="TsNotify" Content="Notify when preferred server comes online"
+                                             Margin="0,8,0,0"
+                                             ToolTip="Show a tray notification when your preferred server goes from offline to online." />
+                            <ui:ToggleSwitch x:Name="TsStartup" Content="Start with Windows"
+                                             Margin="0,8,0,0"
+                                             ToolTip="Launch Make Your Choice automatically when you log in (as a scheduled task, so it starts elevated without a UAC prompt)." />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="Appearance" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource SectionCard}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="App theme" VerticalAlignment="Center" />
+                            <ComboBox x:Name="CbTheme" Grid.Column="1" MinWidth="140">
+                                <ComboBoxItem Content="Use system setting" />
+                                <ComboBoxItem Content="Light" />
+                                <ComboBoxItem Content="Dark" />
+                            </ComboBox>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock Text="Game folder" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource SectionCard}">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBox x:Name="TbGamePath" Grid.Column="0" PlaceholderText="Path to Dead by Daylight…" />
+                                <ui:Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Click="OnBrowseGameFolder" />
+                            </Grid>
+                            <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       Text="Tip: In Steam, right-click Dead by Daylight → Manage → Browse local files. The folder that opens is the one you should select." />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Margin="2,0,0,10" TextWrapping="Wrap" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                               Text="The default options are recommended. You may not want to change these if you aren't sure of what you are doing. Your experience may vary by using settings other than the default." />
+
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,4">
+                        <ui:Button Content="Default Options" Click="OnOptionsDefaults" />
+                        <ui:Button Content="Apply Changes" Appearance="Primary" Margin="8,0,0,0" Click="OnOptionsApply" />
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</ui:FluentWindow>

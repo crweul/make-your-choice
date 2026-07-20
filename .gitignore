@@ -2,5 +2,6 @@
 /.git/
 /.idea/
 /win/obj/
-/linux/target/
+/win/*_wpftmp.csproj
+/dist/
 /.claude/

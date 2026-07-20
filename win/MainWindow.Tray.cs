@@ -1,0 +1,320 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+using System.Windows.Threading;
+
+namespace MakeYourChoice
+{
+    public partial class MainWindow
+    {
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool DestroyIcon(IntPtr handle);
+
+        // A single tray icon: the app icon with a status bubble in the bottom-right corner
+        // (green = preferred server online, red = offline, gray = unknown). The tooltip shows the
+        // server status and the current killer/survivor queue time, sourced from Dead by Queue.
+        private NotifyIcon _tray;
+        private IntPtr _trayHandle = IntPtr.Zero;
+        private Bitmap _appIconBmp;
+        private ContextMenuStrip _trayMenu;
+        private DispatcherTimer _dbqTimer;
+        private bool _minimizeBalloonShown;
+        private bool _exiting;
+        // For offline -> online notifications: the preferred region and its last seen online state.
+        private string _prevPreferredRegion;
+        private bool? _prevPreferredOnline;
+        // Last queue-time text for the preferred region, cached by the Dead by Queue poll and
+        // shown in the tray tooltip alongside the resolved status.
+        private string _lastQueueText = "";
+
+        // AWS region code -> online(true)/offline(false), resolved from Dead by Queue plus the
+        // sniffer's "recently connected" signal.
+        // Read by the server list to fill the "Status" column (Online/Offline/Unknown) for every server.
+        private readonly Dictionary<string, bool> _dbqOnline = new();
+
+        // AWS region code -> where its current status came from ("live" | "dbq").
+        private readonly Dictionary<string, string> _statusSource = new();
+
+        // Status is RESOLVED fresh each poll. Priority:
+        //   live   — you're actually connected right now (sniffer), authoritative while recent
+        //   dbq    — Dead by Queue's value otherwise
+        // _dbqOnline/_statusSource below hold the RESOLVED result (read by the tray + latency list).
+        private readonly Dictionary<string, bool> _dbqRaw = new();         // DBQ's own /regions view
+        private long? _dbqDataUnix;                                        // DBQ's data refresh time (unix)
+        private readonly Dictionary<string, DateTime> _lastConnection = new(); // UTC of last real connection
+        private const int LiveWindowSeconds = 120; // a connection counts as "live" for this long
+        // Status debug: data-age in the tray tooltip. No UI — flip to true here while debugging.
+        private static readonly bool _debugStatus = false;
+
+        private void SetupTray()
+        {
+            if (_tray != null) return; // already set up
+
+            _appIconBmp = LoadAppIconBitmap();
+
+            _trayMenu = new ContextMenuStrip();
+            _trayMenu.Items.Add("Show Make Your Choice", null, (_, __) => RestoreFromTray());
+            _trayMenu.Items.Add(new ToolStripSeparator());
+            _trayMenu.Items.Add("Exit", null, (_, __) => ExitFromTray());
+
+            _tray = new NotifyIcon
+            {
+                Text = "Make Your Choice — waiting for server status…",
+                Visible = true,
+                ContextMenuStrip = _trayMenu,
+            };
+            _tray.DoubleClick += (_, __) => RestoreFromTray();
+
+            SetTrayIcon(MakeStatusIcon(Color.Gray));
+        }
+
+        private void StartDbqTimer()
+        {
+            // Single poll: refresh real online/offline + queue from Dead by Queue, then update the
+            // tray. Dead by Queue is the status source; the sniffer's recent-connection signal
+            // overrides it for the region you are actually playing on.
+            _dbqTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(PollIntervalSeconds) };
+            _dbqTimer.Tick += async (_, __) => await RefreshStatusAsync();
+            _dbqTimer.Start();
+            _ = RefreshStatusAsync(); // immediate first fetch
+        }
+
+        // Real-time override: the moment we actually connect to a server in a region (seen by the
+        // traffic sniffer), that region is definitively ONLINE — more reliable and immediate than
+        // any ping or DBQ's lagged data. Called from OnTrafficDetected.
+        public void MarkRegionOnlineFromConnection(string regionName)
+        {
+            if (string.IsNullOrEmpty(regionName)) return;
+            var code = AwsCodeForRegion(regionName);
+            if (code == null) return;
+            // Record WHEN we connected; "live" is authoritative only while recent (see ResolveStatuses),
+            // so it no longer sticks online forever after you stop playing. Set immediate feedback too.
+            _lastConnection[code] = DateTime.UtcNow;
+            _dbqOnline[code] = true;
+            _statusSource[code] = "live";
+        }
+
+        // Resolve each region's displayed status. Priority:
+        //   1. recent live connection -> ONLINE [live]  (you're on it right now)
+        //   2. DBQ has a value        -> [dbq]          (the status source)
+        //   3. nothing knows          -> unknown
+        private void ResolveStatuses()
+        {
+            var now = DateTime.UtcNow;
+
+            var codes = new HashSet<string>(_dbqRaw.Keys);
+            if (_regions != null)
+                foreach (var kv in _regions)
+                {
+                    var c = AwsCodeForRegion(kv.Key);
+                    if (c != null) codes.Add(c);
+                }
+
+            foreach (var code in codes)
+            {
+                if (_lastConnection.TryGetValue(code, out var t) && (now - t).TotalSeconds < LiveWindowSeconds)
+                {
+                    _dbqOnline[code] = true; _statusSource[code] = "live"; continue;
+                }
+                // Otherwise defer to DBQ's value.
+                if (_dbqRaw.TryGetValue(code, out var dbqVal))
+                {
+                    _dbqOnline[code] = dbqVal; _statusSource[code] = "dbq"; continue;
+                }
+                _dbqOnline.Remove(code); _statusSource.Remove(code); // nothing knows -> unknown
+            }
+        }
+
+        // Poll Dead by Queue for real online/offline status + queue time, and update the tray.
+        private async System.Threading.Tasks.Task RefreshStatusAsync()
+        {
+            if (_exiting || _closed || _tray == null) return;
+
+            var (status, dataUnix) = await DbqClient.GetRegionStatusAsync();
+            if (status.Count > 0)
+            {
+                foreach (var kv in status) _dbqRaw[kv.Key] = kv.Value; // DBQ's own view
+                _dbqDataUnix = dataUnix;                               // how current that view is
+            }
+
+            // Resolve the displayed status: recent live > DBQ.
+            ResolveStatuses();
+
+            if (_exiting || _closed || _tray == null) return;
+
+            var preferred = GetPreferredRegionKey();
+            if (preferred == null)
+            {
+                SetTrayIcon(MakeStatusIcon(Color.Gray));
+                _tray.Text = Trunc("Make Your Choice — select a region to track");
+                _prevPreferredRegion = null;
+                _prevPreferredOnline = null;
+                return;
+            }
+
+            var code = AwsCodeForRegion(preferred);
+            bool? online = (code != null && _dbqOnline.TryGetValue(code, out var on)) ? on : (bool?)null;
+
+            var shortName = preferred.Contains("(")
+                ? preferred.Substring(preferred.IndexOf('(') + 1).TrimEnd(')')
+                : preferred;
+
+            Color bubble = online == true ? Color.LimeGreen : online == false ? Color.Red : Color.Gray;
+            string state = online == true ? "ONLINE" : online == false ? "OFFLINE" : "status unknown";
+            SetTrayIcon(MakeStatusIcon(bubble));
+
+            string queueText = "";
+            if (!string.IsNullOrEmpty(code))
+            {
+                var (qt, min) = await DbqClient.GetQueueAsync(code);
+                // Only show an actual queue time. When a region is down DBQ's endpoint returns a
+                // verbose "no queue" paragraph (min = -1) — never put that in the tray.
+                queueText = min >= 0 ? qt : "";
+                _lastQueueText = queueText;
+            }
+            if (_exiting || _closed || _tray == null) return;
+
+            // Notify on an offline -> online transition for the same preferred region.
+            if (_notifyServerOnline
+                && string.Equals(_prevPreferredRegion, preferred, StringComparison.Ordinal)
+                && _prevPreferredOnline == false && online == true)
+            {
+                _tray.BalloonTipTitle = "Server online";
+                _tray.BalloonTipText = $"{shortName} is now online.";
+                try { _tray.ShowBalloonTip(4000); } catch { }
+            }
+            _prevPreferredRegion = preferred;
+            _prevPreferredOnline = online;
+
+            var queue = string.IsNullOrEmpty(queueText) ? "" : "  -  " + queueText;
+            // Show which source produced this status ("live" = recent real connection), for online
+            // and offline alike.
+            string src = "";
+            if (code != null && online != null && _statusSource.TryGetValue(code, out var s))
+                src = "  [" + s + "]";
+            string dbg = "";
+            if (_debugStatus && code != null)
+            {
+                string age = _dbqDataUnix.HasValue
+                    ? (DateTimeOffset.UtcNow.ToUnixTimeSeconds() - _dbqDataUnix.Value) + "s"
+                    : "?";
+                dbg = $"  (DBQ {age})";
+            }
+            _tray.Text = Trunc($"{shortName}: {state}{queue}{src}{dbg}");
+        }
+
+        // The region the tray reports on: the first checked region.
+        private string GetPreferredRegionKey()
+        {
+            return RegionRowsOnly()
+                .Where(r => r.IsChecked && _regions.ContainsKey(r.Key))
+                .Select(r => r.Key)
+                .FirstOrDefault();
+        }
+
+        private static string Trunc(string s) => s != null && s.Length > 120 ? s.Substring(0, 119) + "…" : s;
+
+        private void SetTrayIcon(Bitmap bmp)
+        {
+            if (_tray == null) { bmp.Dispose(); return; }
+            IntPtr h = bmp.GetHicon();
+            try
+            {
+                _tray.Icon = System.Drawing.Icon.FromHandle(h);
+                if (_trayHandle != IntPtr.Zero) DestroyIcon(_trayHandle);
+                _trayHandle = h;
+            }
+            finally
+            {
+                bmp.Dispose();
+            }
+        }
+
+        private static Bitmap LoadAppIconBitmap()
+        {
+            try
+            {
+                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico");
+                if (File.Exists(path))
+                {
+                    using var ico = new Icon(path, 32, 32);
+                    return new Bitmap(ico.ToBitmap(), 32, 32);
+                }
+            }
+            catch { /* fall through */ }
+            // Fallback: a neutral placeholder so the tray still works.
+            var bmp = new Bitmap(32, 32);
+            using var g = Graphics.FromImage(bmp);
+            g.Clear(Color.FromArgb(110, 84, 148)); // app accent purple
+            return bmp;
+        }
+
+        // App icon with a colored status bubble drawn in the bottom-right corner.
+        private Bitmap MakeStatusIcon(Color bubble)
+        {
+            var bmp = new Bitmap(32, 32);
+            using var g = Graphics.FromImage(bmp);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.Clear(Color.Transparent);
+
+            if (_appIconBmp != null)
+                g.DrawImage(_appIconBmp, new Rectangle(0, 0, 32, 32));
+
+            const int d = 15;
+            int x = 32 - d - 1, y = 32 - d - 1;
+            // White ring for contrast on any taskbar colour.
+            using (var ring = new SolidBrush(Color.White))
+                g.FillEllipse(ring, x - 2, y - 2, d + 4, d + 4);
+            using (var fill = new SolidBrush(bubble))
+                g.FillEllipse(fill, x, y, d, d);
+            using (var pen = new Pen(Color.FromArgb(140, 0, 0, 0), 1))
+                g.DrawEllipse(pen, x, y, d, d);
+            return bmp;
+        }
+
+        // Minimize-to-tray: when enabled, minimizing hides the window (and its taskbar button);
+        // the tray icon remains. Otherwise it behaves like a normal taskbar minimize.
+        private void MinimizeToTrayIfEnabled()
+        {
+            if (!_minimizeToTray || _tray == null) return;
+            Hide();
+            if (!_minimizeBalloonShown)
+            {
+                _minimizeBalloonShown = true;
+                _tray.BalloonTipTitle = "Make Your Choice";
+                _tray.BalloonTipText = "Still running in the system tray. Double-click to restore.";
+                try { _tray.ShowBalloonTip(2000); } catch { }
+            }
+        }
+
+        private void RestoreFromTray()
+        {
+            if (_closed) return;
+            Show();
+            WindowState = System.Windows.WindowState.Normal;
+            ShowInTaskbar = true;
+            Activate();
+        }
+
+        private void ExitFromTray()
+        {
+            _exiting = true;
+            Close();
+        }
+
+        private void DisposeTray()
+        {
+            _exiting = true;
+            try { _dbqTimer?.Stop(); } catch { }
+            if (_tray != null) { _tray.Visible = false; _tray.Dispose(); _tray = null; }
+            if (_trayHandle != IntPtr.Zero) { DestroyIcon(_trayHandle); _trayHandle = IntPtr.Zero; }
+            _appIconBmp?.Dispose();
+            _trayMenu?.Dispose();
+        }
+    }
+}

@@ -15,18 +15,45 @@ namespace MakeYourChoice
 
         private readonly struct AwsCidr
         {
-            public AwsCidr(uint network, uint mask, int prefixLength, string region)
+            public AwsCidr(uint network, uint mask, int prefixLength, string region, string prefix, string service)
             {
                 Network = network;
                 Mask = mask;
                 PrefixLength = prefixLength;
                 Region = region;
+                Prefix = prefix;
+                Service = service;
             }
 
             public uint Network { get; }
             public uint Mask { get; }
             public int PrefixLength { get; }
             public string Region { get; }
+            public string Prefix { get; }
+            public string Service { get; } // AWS service tag, e.g. "EC2", "S3", "AMAZON"
+        }
+
+        /// <summary>
+        /// Returns the set of CIDR strings (e.g. "3.5.0.0/16") belonging to the given AWS region
+        /// codes (e.g. "us-east-1"). Used to firewall-block a region's game-server data plane.
+        ///
+        /// Scoped to the EC2 service — that's where GameLift game servers run — so we block the
+        /// game-server ranges without also nuking unrelated AWS traffic (S3, CloudFront, Route53, …).
+        /// This also shrinks the block list roughly 4x (~7000 -> ~1800 CIDRs), keeping the firewall
+        /// rules small enough that New-NetFirewallRule doesn't choke.
+        /// </summary>
+        public async Task<List<string>> GetCidrStringsForRegionsAsync(ISet<string> regionCodes)
+        {
+            await RefreshRangesAsync().ConfigureAwait(false);
+            var set = new HashSet<string>();
+            foreach (var c in _cidrs)
+            {
+                if (c.Region != null && c.Prefix != null
+                    && string.Equals(c.Service, "EC2", StringComparison.OrdinalIgnoreCase)
+                    && regionCodes.Contains(c.Region))
+                    set.Add(c.Prefix);
+            }
+            return new List<string>(set);
         }
 
         private async Task<List<AwsCidr>> FetchRangesAsync()
@@ -56,10 +83,11 @@ namespace MakeYourChoice
                         }
 
                         var region = p.TryGetProperty("region", out var regionEl) ? regionEl.GetString() : null;
+                        var service = p.TryGetProperty("service", out var serviceEl) ? serviceEl.GetString() : null;
 
                         if (TryParseIpv4Cidr(ipPrefix, out var network, out var mask, out var prefixLength))
                         {
-                            list.Add(new AwsCidr(network, mask, prefixLength, region));
+                            list.Add(new AwsCidr(network, mask, prefixLength, region, ipPrefix, service));
                         }
                     }
                 }
