@@ -19,28 +19,13 @@ Make Your Choice is a server region changer for Dead by Daylight. It allows you 
 
 # Table of Contents
 - [Make Your Choice](#make-your-choice)
-- [Installation: Windows](#installation-windows)
-  - [Installation](#installation)
+- [Installation](#installation)
   - [Supported Windows Versions](#supported-windows-versions)
   - [UAC Popup & SmartScreen Alert](#uac-popup--smartscreen-alert)
-- [Installation: Linux / SteamOS](#installation-linux--steamos)
-  - [Method 1: Package Manager](#method-1-package-manager)
-    - [Arch](#arch)
-  - [Method 2: Build & Install From Source (Makefile)](#method-2-build--install-from-source-makefile)
-    - [Prerequisites](#prerequisites)
-      - [Arch](#arch-1)
-      - [Debian / Ubuntu / ZorinOS](#debian--ubuntu--zorinos)
-      - [Fedora](#fedora)
-      - [openSUSE](#opensuse)
-    - [Build & Install](#build--install)
-  - [Method 3: Precompiled Binary](#method-3-precompiled-binary)
 - [Screenshots](#screenshots)
-  - [Windows](#windows)
-  - [Linux](#linux)
 - [Frequently Asked Questions](#faq)
 
-# Installation: Windows
-## Installation
+# Installation
 Download the latest `.exe` file from the [Releases](https://github.com/crweul/make-your-choice/releases/latest) page and run it as administrator.
 
 ## Supported Windows Versions
@@ -51,76 +36,14 @@ Download the latest `.exe` file from the [Releases](https://github.com/crweul/ma
 The application needs to be run with [administrator permissions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/) to ensure the hosts file can be edited. Since I don't want to pay Microsoft a fee for getting this free application signed, you will be met with a prompt to trust the unknown developer.  
 <img src="https://i.imgur.com/zpMPDzM.png" alt="Main" height="350"> <img src="https://i.imgur.com/bu62CXd.png" alt="Main" height="350">
 
-# Installation: Linux / SteamOS
-> [!NOTE]
-> **For SteamOS users**: There are two ways to use Make Your Choice:  
-> 1. Download the binary and simply run it. For this, follow the steps for "Precompiled Binary" at the bottom. (Easiest)
-> 2. Disable system immutability, and follow the steps for Arch Linux. This will give you a nice desktop entry which makes it easier to use the program. (Advanced, only recommended for nerds)
-
-## Method 1: Package Manager
-Currently, only Arch Linux is supported for this method.  
-*If you would like to contribute: feel free to distribute Make Your Choice for other package managers, and give me a headsup so I can provide official steps for other people to follow.*
-### Arch
-Simply install the program from the AUR using your AUR helper of choice:
-```bash
-# Using yay
-yay -S make-your-choice
-
-# Using paru
-paru -S make-your-choice
-
-# Using pikaur
-pikaur -S make-your-choice
-```
-
-## Method 2: Build & Install From Source (Makefile)
-This method can be used to build and install the program straight from source using Makefile. This is the best choice for most distros that aren't SteamOS or Arch.
-### Prerequisites
-Install the prerequisite packages in order to build, install and run the program. If your distro isn't listed below, find out the correct package names for your distro's package manager.
-#### Arch
-```bash
-sudo pacman -S rust gtk4 polkit base-devel git dbus nftables
-```
-#### Debian / Ubuntu / ZorinOS
-```bash
-sudo apt install cargo rustc make gcc pkg-config libgtk-4-dev libdbus-1-dev git policykit-1 nftables
-```
-#### Fedora
-```bash
-sudo dnf install cargo rust make gcc pkg-config gtk4-devel dbus-devel git polkit nftables
-```
-#### openSUSE
-```bash
-sudo zypper install cargo rust make gcc pkg-config gtk4-devel dbus-1-devel git polkit nftables
-```
-
-### Build & Install
-Clone and install using Makefile:
-```bash
-cd ~/ && git clone https://github.com/crweul/make-your-choice.git
-cd make-your-choice/linux/makefile && make install
-cd ~/ && rm -rf ~/make-your-choice
-```
-After installation, the clone will be removed.
-
-## Method 3: Precompiled Binary
-This option won't provide desktop entries to easily access the app. Use this only if you have no other options available. No prerequisites are required. Simply download the binary from the [Releases](https://github.com/crweul/make-your-choice/releases/latest) page and run it.
-
-This option is recommended if you have a SteamOS device.
-
-
 # Screenshots
-## Windows
 <img src="https://i.imgur.com/36jV4su.png" alt="Main" height="450"> <img src="https://i.imgur.com/45Gesfc.png" alt="Main" height="450">  
 *Screenshots taken on Windows 11 Pro 25H2*
-## Linux
-<img src="https://i.imgur.com/VlHsxtc.png" alt="Main" height="450"> <img src="https://i.imgur.com/BXZuWkL.png" alt="Main" height="450"> <img src="https://i.imgur.com/xtvswcf.png" alt="Main" height="450">  
-*Screenshots taken on Arch Linux with the KDE Plasma Desktop Environment.*
 
 # FAQ
 <details>
   <summary><b>Does Make Your Choice work on Steam Deck?</b></summary>
-  Yes! Simply download and run the Linux binary from the <a href="https://github.com/crweul/make-your-choice/releases/latest">Releases</a> page.
+  No. The Linux build has been discontinued; Make Your Choice is currently Windows-only.
   <br>
 </details>
 <details>

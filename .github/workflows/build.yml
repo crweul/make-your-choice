@@ -8,45 +8,6 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zsh libgtk-4-dev pkg-config build-essential
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify toolchain (Linux)
-        run: |
-          zsh --version
-          rustc --version
-          cargo --version
-
-      - name: Read version
-        run: |
-          VERSION=$(sed -n 's/^version:[[:space:]]*//p' VERSINF.yml | head -n1)
-          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
-
-      - name: Build (Linux)
-        working-directory: linux
-        run: zsh build.zsh
-
-      - name: Package (Linux)
-        run: |
-          mkdir -p dist
-          cp linux/target/release/make-your-choice "dist/MakeYourChoice-${RELEASE_VERSION}-Linux"
-
-      - name: Upload to Release (Linux)
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/MakeYourChoice-${{ env.RELEASE_VERSION }}-Linux
-
   build-windows:
     runs-on: windows-latest
     steps:
