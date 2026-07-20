@@ -147,7 +147,7 @@
                     <!-- Shown only when a newer release is available -->
                     <ui:Button x:Name="UpdateButton" Appearance="Secondary" Click="OnUpdateNow" Visibility="Collapsed"
                                Margin="0,10,0,0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
-                               ToolTip="A new version is available — open the latest release">
+                               ToolTip="A new version is available!">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE896;" FontFamily="Segoe Fluent Icons" VerticalAlignment="Center" />
                             <TextBlock Text="Update" Margin="8,0,0,0" VerticalAlignment="Center" />
